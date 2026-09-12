@@ -5,6 +5,7 @@
   "description": "Agent-native organizer for ChatGPT conversation history",
   "engines": { "node": ">=20" },
   "scripts": {
+    "organizer": "node src/cli.js",
     "login": "node scripts/02-login.js",
     "discover": "node scripts/01-discover.js",
     "test": "node --test",
