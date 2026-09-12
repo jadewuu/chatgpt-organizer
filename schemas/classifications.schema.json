@@ -1,0 +1,21 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "array",
+  "items": {
+    "type": "object",
+    "required": ["conversationId", "project", "confidence", "reason", "suggestedAction"],
+    "additionalProperties": false,
+    "properties": {
+      "conversationId": { "type": "string", "minLength": 1 },
+      "project": {
+        "anyOf": [
+          { "type": "string", "minLength": 1 },
+          { "type": "null" }
+        ]
+      },
+      "confidence": { "type": "number", "minimum": 0, "maximum": 1 },
+      "reason": { "type": "string", "minLength": 1 },
+      "suggestedAction": { "enum": ["move", "archive", "keep"] }
+    }
+  }
+}

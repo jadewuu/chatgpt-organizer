@@ -11,6 +11,8 @@
     "privacy:audit": "node scripts/privacy-audit.js"
   },
   "dependencies": {
-    "playwright": "^1.62.1"
+    "ajv": "^8.20.0",
+    "playwright": "^1.62.1",
+    "yaml": "^2.9.0"
   }
 }

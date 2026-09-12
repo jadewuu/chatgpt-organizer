@@ -1,0 +1,19 @@
+provider: chatgpt
+classification:
+  moveThreshold: 0.95
+  fullContentBelow: 0.90
+actions:
+  allowCreateProjects: false
+  allowMove: false
+  allowArchive: false
+  neverDelete: true
+taxonomy:
+  projects:
+    - name: Work
+      description: Ongoing professional work and decisions.
+      include: []
+      exclude: []
+    - name: Learning
+      description: Research, study, and reusable explanations.
+      include: []
+      exclude: []

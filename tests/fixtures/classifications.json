@@ -1,0 +1,9 @@
+[
+  {
+    "conversationId": "fixture-chat-1",
+    "project": "Work",
+    "confidence": 0.97,
+    "reason": "Synthetic reason",
+    "suggestedAction": "move"
+  }
+]
