@@ -2,10 +2,11 @@
 const path = require("node:path");
 const { createPaths } = require("../src/core/paths");
 const { ChatGPTAdapter } = require("../src/providers/chatgpt/adapter");
+const { isCompleteConversationRecord } = require("../src/providers/chatgpt/normalize");
 
-async function main(args = process.argv.slice(2)) {
+async function main(args = process.argv.slice(2), deps = {}) {
   process.stderr.write("Deprecated: scripts/04-read.js delegates to ChatGPTAdapter. Data now lives under .local/.\n");
-  const paths = createPaths();
+  const paths = deps.paths || createPaths();
   const values = { "--max": Infinity, "--delay": 2500, "--cooldown-every": 0, "--cooldown-secs": 60, "--rebrowser-every": 0 };
   let all = false;
   let sample = null;
@@ -27,7 +28,7 @@ async function main(args = process.argv.slice(2)) {
   }
   if (!all && sample === null && !inputs.length) throw new Error("Usage: scripts/04-read.js <full-id> [...] | --sample N | --all [--max N]");
   if (Number(all) + Number(sample !== null) + Number(inputs.length > 0) !== 1) throw new Error("Choose IDs, --sample, or --all");
-  const adapter = new ChatGPTAdapter({ paths, headless });
+  const adapter = deps.adapter || new ChatGPTAdapter({ paths, headless });
   try {
     const list = adapter.readJson(path.join(paths.raw, "conversations.json")) || [];
     const resolveId = (input) => {
@@ -38,7 +39,10 @@ async function main(args = process.argv.slice(2)) {
     };
     let ids = all || sample !== null ? list.slice(0, sample ?? Infinity).map((item) => item.conversationId) : inputs.map(resolveId);
     if ((all || sample !== null) && !list.length) throw new Error("No local inventory; run pnpm organizer discover first");
-    if (all) ids = ids.filter((id) => !adapter.readJson(path.join(paths.raw, "conversations", `${id}.json`)));
+    if (all) {
+      await adapter.getAccountFingerprint();
+      ids = ids.filter((id) => !isCompleteConversationRecord(adapter.readConversationCheckpoint(id), id));
+    }
     ids = ids.slice(0, values["--max"]);
     for (let i = 0; i < ids.length; i++) {
       await adapter.readConversation(ids[i]);

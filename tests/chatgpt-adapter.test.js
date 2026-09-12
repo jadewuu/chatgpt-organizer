@@ -10,9 +10,11 @@ const { ChatGPTAdapter } = require("../src/providers/chatgpt/adapter");
 const { createBrowser } = require("../src/providers/chatgpt/browser");
 const { selectors } = require("../src/providers/chatgpt/selectors");
 const { main } = require("../src/cli");
+const { main: readWrapper } = require("../scripts/04-read");
 const fixtures = require("./fixtures/conversations.json");
 
-function setup(t, { loggedIn = true, status = 200, accountId = "fixture-account" } = {}) {
+function setup(t, { loggedIn = true, status = 200, accountId = "fixture-account", emitSession = true, emitList = true,
+  listJson = async () => ({ items: [...fixtures, { ...fixtures[0], title: "Synthetic latest", update_time: 1700000400 }] }) } = {}) {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "organizer-adapter-"));
   t.after(() => fs.rmSync(root, { recursive: true, force: true }));
   const paths = createPaths(root);
@@ -24,12 +26,13 @@ function setup(t, { loggedIn = true, status = 200, accountId = "fixture-account"
   page.mouse = { move: async () => {}, wheel: async () => {} };
   const location = { get href() { return url; }, set href(value) { url = value; }, get origin() { return new URL(url).origin; } };
   const nav = { scrollTop: 0, scrollHeight: 600, clientHeight: 600 };
+  let messages = [{ getAttribute: () => "user", querySelector: () => null, innerText: "Synthetic message" }];
   const document = {
     title: "Synthetic detail - ChatGPT",
     querySelector: (selector) => selector === selectors.historyNavigation && loggedIn ? nav : null,
     querySelectorAll: (selector) => {
       if (selector === "button" && !loggedIn) return [{ getClientRects: () => [1], getAttribute: () => null, textContent: "Log in" }];
-      if (selector === selectors.messageRoles) return [{ getAttribute: () => "user", querySelector: () => null, innerText: "Synthetic message" }];
+      if (selector === selectors.messageRoles) return messages;
       return [];
     },
   };
@@ -41,16 +44,15 @@ function setup(t, { loggedIn = true, status = 200, accountId = "fixture-account"
   const browser = {
     launch: async () => page,
     goto: async () => {
-      page.emit("response", { url: () => "https://chatgpt.com/api/auth/session", status: () => 200,
+      if (emitSession) page.emit("response", { url: () => "https://chatgpt.com/api/auth/session", status: () => 200,
         json: async () => ({ user: { id: accountId, email: "fixture@example.invalid" }, accessToken: "synthetic-token" }) });
-      page.emit("response", { url: () => "https://chatgpt.com/backend-api/conversations?offset=0", status: () => status,
-        json: async () => ({ items: [...fixtures, { ...fixtures[0], title: "Synthetic latest", update_time: 1700000400 }] }) });
+      if (emitList) page.emit("response", { url: () => "https://chatgpt.com/backend-api/conversations?offset=0", status: () => status, json: listJson });
     },
     close: async () => { closed++; },
   };
   const adapter = new ChatGPTAdapter({ paths, browser });
   t.after(() => adapter.close());
-  return { paths, page, adapter, closed: () => closed, setLoggedIn: (value) => { loggedIn = value; } };
+  return { paths, page, adapter, closed: () => closed, setLoggedIn: (value) => { loggedIn = value; }, setMessages: (value) => { messages = value; } };
 }
 
 test("discovery captures native responses, merges IDs, and limits private normalized output", async (t) => {
@@ -122,13 +124,13 @@ test("manual login can recover from an initial unauthenticated native response",
 });
 
 test("account verification waits for native session context and fails closed when absent", async (t) => {
-  const { adapter, page } = setup(t, { accountId: null });
+  const { adapter, page } = setup(t, { emitSession: false });
   page.waitForTimeout = async () => {
     page.emit("response", { url: () => "https://chatgpt.com/api/auth/session", status: () => 200,
       json: async () => ({ user: { id: "fixture-account" } }) });
   };
   assert.match(await adapter.getAccountFingerprint(), /^[a-f0-9]{16}$/);
-  const absent = setup(t, { accountId: null });
+  const absent = setup(t, { emitSession: false });
   await assert.rejects(absent.adapter.getAccountFingerprint(), /account context unavailable/i);
   assert.equal(fs.existsSync(path.join(absent.paths.state, "account.json")), false);
 });
@@ -150,4 +152,135 @@ test("CLI loads login and discover lazily, closes owned adapters, and rejects in
   assert.equal(await main(["discover", "--max", "-1"], { adapter, stdout: output, stderr: output }), 1);
   assert.equal(closed(), 2);
   assert.equal(await main(["read"], { stdout: output, stderr: output }), 2);
+});
+
+for (const [name, options] of [
+  ["malformed JSON", { listJson: async () => { throw new SyntaxError("Synthetic malformed JSON"); } }],
+  ["unsupported list schema", { listJson: async () => ({ conversations: fixtures }) }],
+  ["invalid list item", { listJson: async () => ({ items: [{ title: "Missing synthetic ID" }] }) }],
+  ["invalid list metadata", { listJson: async () => ({ items: [{ id: "fixture-chat-1", title: { unexpected: "Synthetic metadata" } }] }) }],
+  ["missing native list response", { emitList: false }],
+  ["unexpected HTTP status", { status: 503 }],
+]) {
+  test(`discovery rejects ${name} and preserves the prior inventory`, async (t) => {
+    for (const priorExists of [false, true]) {
+      const { adapter, paths } = setup(t, options);
+      const target = path.join(paths.raw, "conversations.json");
+      const prior = '[{"provider":"chatgpt","conversationId":"fixture-prior"}]\n';
+      if (priorExists) { fs.mkdirSync(paths.raw, { recursive: true }); fs.writeFileSync(target, prior); }
+      await assert.rejects(adapter.discoverConversations(), /discovery|list response/i);
+      assert.equal(fs.existsSync(target), priorExists);
+      if (priorExists) assert.equal(fs.readFileSync(target, "utf8"), prior);
+    }
+  });
+}
+
+test("failed later pagination preserves the prior inventory instead of a partial first page", async (t) => {
+  const { adapter, paths, page } = setup(t);
+  const target = path.join(paths.raw, "conversations.json");
+  const prior = '[{"provider":"chatgpt","conversationId":"fixture-prior"}]\n';
+  fs.mkdirSync(paths.raw, { recursive: true });
+  fs.writeFileSync(target, prior);
+  page.mouse.wheel = async () => {
+    page.emit("response", { url: () => "https://chatgpt.com/backend-api/conversations?offset=2", status: () => 500, json: async () => ({}) });
+  };
+  await assert.rejects(adapter.discoverConversations(), /discovery|list response/i);
+  assert.equal(fs.readFileSync(target, "utf8"), prior);
+});
+
+for (const failed of [false, true]) {
+  test(`${failed ? "failed" : "unfinished"} pagination request cannot become a successful inventory`, async (t) => {
+    const { adapter, page, paths } = setup(t);
+    const request = { url: () => "https://chatgpt.com/backend-api/conversations?offset=2" };
+    page.mouse.wheel = async () => {
+      page.emit("request", request);
+      if (failed) page.emit("requestfailed", request);
+    };
+    await assert.rejects(adapter.discoverConversations(), /discovery|list request/i);
+    assert.equal(fs.existsSync(path.join(paths.raw, "conversations.json")), false);
+  });
+}
+
+test("final extraction rejects disappeared message nodes without replacing a checkpoint", async (t) => {
+  const { adapter, paths, page, setMessages } = setup(t);
+  const target = path.join(paths.raw, "conversations", "fixture-chat-1.json");
+  page.waitForTimeout = async (ms) => { if (ms === 1200) setMessages([]); };
+  await assert.rejects(adapter.readConversation("fixture-chat-1"), /incomplete|message|snapshot/i);
+  assert.equal(fs.existsSync(target), false);
+});
+
+test("final extraction rejects a snapshot at another origin or conversation path", async (t) => {
+  for (const url of ["https://example.invalid/c/fixture-chat-1", "https://chatgpt.com/c/fixture-other"]) {
+    const { adapter, paths, page } = setup(t);
+    const evaluate = page.evaluate;
+    page.evaluate = async (fn, arg) => {
+      const result = await evaluate(fn, arg);
+      if (result?.messages) result.url = url;
+      return result;
+    };
+    await assert.rejects(adapter.readConversation("fixture-chat-1"), /incomplete|snapshot|navigation/i);
+    assert.equal(fs.existsSync(path.join(paths.raw, "conversations", "fixture-chat-1.json")), false);
+  }
+});
+
+test("malformed and empty conversation checkpoints are re-read rather than resumed", async (t) => {
+  for (const contents of ['{"broken":', JSON.stringify({ provider: "chatgpt", conversationId: "fixture-chat-1", url: "https://chatgpt.com/c/fixture-chat-1", messages: [] })]) {
+    const { adapter, paths, page } = setup(t);
+    const target = path.join(paths.raw, "conversations", "fixture-chat-1.json");
+    fs.mkdirSync(path.dirname(target), { recursive: true });
+    fs.writeFileSync(target, contents);
+    const record = await adapter.readConversation("fixture-chat-1");
+    assert.equal(page.url(), "https://chatgpt.com/c/fixture-chat-1");
+    assert.deepEqual(record.messages, [{ role: "user", text: "Synthetic message" }]);
+    assert.deepEqual(JSON.parse(fs.readFileSync(target)), record);
+  }
+});
+
+test("legacy --all wrapper re-reads incomplete checkpoints with the adapter's completeness rules", async (t) => {
+  const { adapter, paths } = setup(t);
+  const directory = path.join(paths.raw, "conversations");
+  fs.mkdirSync(directory, { recursive: true });
+  fs.writeFileSync(path.join(paths.raw, "conversations.json"), JSON.stringify(fixtures.map((item) => ({ provider: "chatgpt", conversationId: item.id }))));
+  fs.writeFileSync(path.join(directory, "fixture-chat-1.json"), '{"broken":');
+  fs.writeFileSync(path.join(directory, "fixture-chat-2-full-id.json"), JSON.stringify({ provider: "chatgpt", conversationId: "fixture-chat-2-full-id", url: "https://chatgpt.com/c/fixture-chat-2-full-id", messages: [] }));
+  await readWrapper(["--all", "--delay", "0"], { paths, adapter });
+  for (const id of ["fixture-chat-1", "fixture-chat-2-full-id"]) {
+    assert.deepEqual(JSON.parse(fs.readFileSync(path.join(directory, `${id}.json`))).messages, [{ role: "user", text: "Synthetic message" }]);
+  }
+});
+
+test("an empty session invalidates fingerprint verification and cached reads until a later valid login", async (t) => {
+  for (const invalidSession of [{}, { user: {} }, { user: { id: "  " } }]) {
+    const { adapter, page } = setup(t);
+    const record = await adapter.readConversation("fixture-chat-1");
+    page.emit("response", { url: () => "https://chatgpt.com/api/auth/session", status: () => 200, json: async () => invalidSession });
+    await assert.rejects(adapter.getAccountFingerprint(), /login|account context/i);
+    await assert.rejects(adapter.readConversation("fixture-chat-1"), /login|account context/i);
+    await assert.rejects(adapter.discoverConversations({ max: 1 }), /login|account context/i);
+    await assert.rejects(adapter.login({ timeoutMs: 0 }), /login/i);
+    page.waitForTimeout = async () => {
+      page.emit("response", { url: () => "https://chatgpt.com/api/auth/session", status: () => 200, json: async () => ({ user: { id: "fixture-account" } }) });
+    };
+    await adapter.login();
+    assert.deepEqual(await adapter.readConversation("fixture-chat-1"), record);
+  }
+});
+
+test("legacy --all wrapper verifies the current account even when every checkpoint is complete", async (t) => {
+  const { adapter, paths, page } = setup(t);
+  await adapter.readConversation("fixture-chat-1");
+  fs.writeFileSync(path.join(paths.raw, "conversations.json"), JSON.stringify([{ provider: "chatgpt", conversationId: "fixture-chat-1" }]));
+  page.emit("response", { url: () => "https://chatgpt.com/api/auth/session", status: () => 200, json: async () => ({}) });
+  await assert.rejects(readWrapper(["--all"], { paths, adapter }), /login|account context/i);
+});
+
+test("a delayed old session cannot restore identity after a newer empty session", async (t) => {
+  const { adapter, page } = setup(t);
+  await adapter.getAccountFingerprint();
+  let resolveOld;
+  page.emit("response", { url: () => "https://chatgpt.com/api/auth/session", status: () => 200,
+    json: () => new Promise((resolve) => { resolveOld = resolve; }) });
+  page.emit("response", { url: () => "https://chatgpt.com/api/auth/session", status: () => 200, json: async () => ({}) });
+  resolveOld({ user: { id: "fixture-account" } });
+  await assert.rejects(adapter.getAccountFingerprint(), /login|account context/i);
 });

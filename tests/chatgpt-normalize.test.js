@@ -1,7 +1,7 @@
 const test = require("node:test");
 const assert = require("node:assert/strict");
 const fixtures = require("./fixtures/conversations.json");
-const { normalizeApiConversation, mergeConversations } = require("../src/providers/chatgpt/normalize");
+const { normalizeApiConversation, mergeConversations, isCompleteConversationRecord } = require("../src/providers/chatgpt/normalize");
 
 test("normalizes ChatGPT list items without message content", () => {
   assert.deepEqual(normalizeApiConversation({ ...fixtures[0], messages: ["synthetic secret"] }), {
@@ -29,4 +29,15 @@ test("normalization preserves project IDs and excludes entries without a usable 
   assert.equal(normalizeApiConversation({ title: "Missing ID" }), null);
   assert.equal(normalizeApiConversation({ id: "../outside" }), null);
   assert.deepEqual(mergeConversations([null]), []);
+});
+
+test("only nonempty usable conversation records at their exact provider URL are complete", () => {
+  const record = { provider: "chatgpt", conversationId: "fixture-chat-1", url: "https://chatgpt.com/c/fixture-chat-1", messages: [{ role: "user", text: "Synthetic content" }] };
+  assert.equal(isCompleteConversationRecord(record, "fixture-chat-1"), true);
+  for (const invalid of [null, {}, { ...record, messages: [] }, { ...record, messages: [{ role: "", text: "Synthetic content" }] },
+    { ...record, messages: [{ role: "user", text: "  " }] }, { ...record, messages: [{ role: "user", text: null }] },
+    { ...record, url: "https://example.invalid/c/fixture-chat-1" }, { ...record, url: "https://chatgpt.com/c/fixture-other" }]) {
+    assert.equal(isCompleteConversationRecord(invalid, "fixture-chat-1"), false);
+  }
+  assert.equal(isCompleteConversationRecord(record, "fixture-chat"), false);
 });

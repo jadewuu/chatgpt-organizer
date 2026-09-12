@@ -1,5 +1,8 @@
 function normalizeApiConversation(item) {
   if (!item || typeof item.id !== "string" || !/^[A-Za-z0-9_-]+$/.test(item.id)) return null;
+  if (item.title != null && typeof item.title !== "string") return null;
+  if ([item.create_time, item.update_time].some((value) => value != null && (typeof value !== "number" || !Number.isFinite(value)))) return null;
+  if (item.gizmo_id != null && typeof item.gizmo_id !== "string") return null;
   return {
     provider: "chatgpt",
     conversationId: item.id,
@@ -22,4 +25,15 @@ function mergeConversations(items) {
   return [...conversations.values()];
 }
 
-module.exports = { normalizeApiConversation, mergeConversations };
+function isCompleteConversationRecord(record, id) {
+  if (!record || record.provider !== "chatgpt" || record.conversationId !== id
+    || typeof id !== "string" || !/^[A-Za-z0-9_-]+$/.test(id)
+    || typeof record.url !== "string" || !Array.isArray(record.messages) || record.messages.length === 0) return false;
+  let url;
+  try { url = new URL(record.url); } catch { return false; }
+  return url.origin === "https://chatgpt.com" && url.pathname === `/c/${id}`
+    && record.messages.every((message) => message && ["user", "assistant", "system", "developer", "tool"].includes(message.role)
+      && typeof message.text === "string" && message.text.trim().length > 0);
+}
+
+module.exports = { normalizeApiConversation, mergeConversations, isCompleteConversationRecord };

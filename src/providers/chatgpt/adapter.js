@@ -4,7 +4,12 @@ const { createHash } = require("node:crypto");
 const { createPaths } = require("../../core/paths");
 const { createBrowser, assertPrivatePath } = require("./browser");
 const { selectors, patterns } = require("./selectors");
-const { normalizeApiConversation, mergeConversations } = require("./normalize");
+const { normalizeApiConversation, mergeConversations, isCompleteConversationRecord } = require("./normalize");
+
+function isListUrl(value) {
+  const url = new URL(value);
+  return url.origin === "https://chatgpt.com" && url.pathname === "/backend-api/conversations";
+}
 
 class ChatGPTAdapter {
   constructor({ paths = createPaths(), browser, chromeExecutable, headless = false } = {}) {
@@ -18,16 +23,32 @@ class ChatGPTAdapter {
     this.fingerprint = null;
     this.failure = null;
     this.authRequired = false;
+    this.sessionRevision = 0;
+    this.lastFingerprint = null;
+    this.discoveryFailure = null;
+    this.validListResponses = 0;
+    this.listRequests = new Set();
   }
 
   async open() {
     if (this.page) return this.page;
     this.page = await this.browser.launch({ headless: this.headless });
     this.responseListener = (response) => {
-      const pending = this.captureResponse(response).catch(() => {}).finally(() => this.pending.delete(pending));
+      const pending = this.captureResponse(response).catch(() => {
+        this.failure = new Error("Unable to validate native response; stopped");
+      }).finally(() => this.pending.delete(pending));
       this.pending.add(pending);
     };
     this.page.on("response", this.responseListener);
+    this.requestListener = (request) => { if (isListUrl(request.url())) this.listRequests.add(request); };
+    this.requestFinishedListener = (request) => this.listRequests.delete(request);
+    this.requestFailedListener = (request) => {
+      if (isListUrl(request.url())) this.discoveryFailure = new Error("Discovery list request failed; inventory unchanged");
+      this.listRequests.delete(request);
+    };
+    this.page.on("request", this.requestListener);
+    this.page.on("requestfinished", this.requestFinishedListener);
+    this.page.on("requestfailed", this.requestFailedListener);
     await this.browser.goto("https://chatgpt.com/");
     return this.page;
   }
@@ -41,23 +62,49 @@ class ChatGPTAdapter {
     if (response.status() === 429) this.failure = new Error("Rate limit detected; stopped");
     if (response.status() === 403) this.failure = new Error("Access restriction detected; stopped");
     if (response.status() === 401) this.authRequired = true;
-    if (response.status() !== 200 || (!session && !list)) return;
-    const data = await response.json();
-    if (session && typeof data?.user?.id === "string" && data.user.id.length > 0) {
+    if (list) {
+      if (response.status() !== 200) {
+        this.discoveryFailure = new Error("Discovery list response has an unexpected HTTP status; inventory unchanged");
+        return;
+      }
+      try {
+        const data = await response.json();
+        if (!data || !Array.isArray(data.items)) throw new Error("Unsupported list schema");
+        const items = data.items.map(normalizeApiConversation);
+        if (items.some((item) => !item)) throw new Error("Invalid list item");
+        this.items = mergeConversations([...this.items, ...items]);
+        this.validListResponses++;
+      } catch {
+        this.discoveryFailure = new Error("Discovery list response is malformed or unsupported; inventory unchanged");
+      }
+      return;
+    }
+    if (session) {
+      const revision = ++this.sessionRevision;
+      this.fingerprint = null;
+      this.authRequired = true;
+      if (response.status() !== 200) return;
+      let data;
+      try { data = await response.json(); } catch { return; }
+      if (revision !== this.sessionRevision) return;
+      if (typeof data?.user?.id !== "string" || !data.user.id.trim()) return;
       const digest = createHash("sha256").update(data.user.id).digest("hex").slice(0, 16);
-      if (this.fingerprint && this.fingerprint !== digest) this.failure = new Error("Account mismatch; stopped");
+      if (this.lastFingerprint && this.lastFingerprint !== digest) this.failure = new Error("Account mismatch; stopped");
+      this.lastFingerprint = digest;
       this.fingerprint = digest;
       this.authRequired = false;
-    }
-    if (list && Array.isArray(data.items)) {
-      this.items = mergeConversations([...this.items, ...data.items.map(normalizeApiConversation)]);
     }
   }
 
   async checkResponses({ allowLoginRequired = false } = {}) {
-    await Promise.all([...this.pending]);
+    while (this.pending.size) await Promise.all([...this.pending]);
     if (this.failure) throw this.failure;
     if (this.authRequired && !allowLoginRequired) throw new Error("Login required in the dedicated profile");
+  }
+
+  async checkDiscoveryResponses() {
+    await this.checkResponses();
+    if (this.discoveryFailure) throw this.discoveryFailure;
   }
 
   async loginState() {
@@ -122,15 +169,9 @@ class ChatGPTAdapter {
     const nav = this.page.locator(selectors.historyNavigation).first();
     let lastCount = -1;
     let stale = 0;
-    const checkpoint = async () => {
-      await this.checkResponses();
-      const records = this.items.slice(0, max);
-      this.writeJson(path.join(this.paths.raw, "conversations.json"), records);
-      return records;
-    };
     for (let i = 0; i < 300; i++) {
       if (!(await this.loginState()).loggedIn) throw new Error("Login required in the dedicated profile; stopped");
-      await checkpoint();
+      await this.checkDiscoveryResponses();
       if (this.items.length >= max) break;
       const box = await nav.boundingBox();
       if (!box) throw new Error("History navigation unavailable; stopped");
@@ -149,7 +190,7 @@ class ChatGPTAdapter {
           await this.page.waitForTimeout(600);
           await this.page.mouse.wheel(0, 150);
           await this.page.waitForTimeout(1200);
-          await this.checkResponses();
+          await this.checkDiscoveryResponses();
           const after = await this.page.evaluate((selector) => document.querySelector(selector)?.scrollHeight, selectors.historyNavigation);
           if (after === metrics.scrollH && before === this.items.length) break;
           stale = 0;
@@ -157,9 +198,20 @@ class ChatGPTAdapter {
       } else stale = 0;
       await this.page.mouse.wheel(0, 500);
       await this.page.waitForTimeout(700);
-      if (i === 299) throw new Error("Discovery scroll limit reached; partial checkpoint saved");
+      if (i === 299) throw new Error("Discovery scroll limit reached; inventory unchanged");
     }
-    return checkpoint();
+    for (let i = 0; this.listRequests.size && i < 30; i++) {
+      await this.page.waitForTimeout(500);
+      await this.checkDiscoveryResponses();
+    }
+    if (this.listRequests.size) throw new Error("Discovery list request did not finish; inventory unchanged");
+    await this.checkDiscoveryResponses();
+    if (!this.validListResponses) throw new Error("Discovery received no validated native list response; inventory unchanged");
+    if (!(await this.loginState()).loggedIn) throw new Error("Login required in the dedicated profile; stopped");
+    await this.checkDiscoveryResponses();
+    const records = this.items.slice(0, max);
+    this.writeJson(path.join(this.paths.raw, "conversations.json"), records);
+    return records;
   }
 
   async readConversation(id) {
@@ -167,8 +219,8 @@ class ChatGPTAdapter {
     await this.open();
     await this.getAccountFingerprint();
     const target = path.join(this.paths.raw, "conversations", `${id}.json`);
-    const existing = this.readJson(target);
-    if (existing?.provider === "chatgpt" && existing.conversationId === id && Array.isArray(existing.messages)) return existing;
+    const existing = this.readConversationCheckpoint(id);
+    if (isCompleteConversationRecord(existing, id)) return existing;
     const url = `https://chatgpt.com/c/${id}`;
     try { await this.page.evaluate((url) => { location.href = url; }, url); }
     catch (error) { if (!/execution context was destroyed|navigation/i.test(error.message)) throw error; }
@@ -187,6 +239,7 @@ class ChatGPTAdapter {
     await this.page.waitForTimeout(1200);
     if (!(await this.loginState()).loggedIn) throw new Error("Login required in the dedicated profile; stopped");
     const data = await this.page.evaluate(({ selectors }) => ({
+      url: location.href,
       title: document.title.replace(/\s*[-|]\s*ChatGPT.*$/i, "").trim(),
       messages: [...document.querySelectorAll(selectors.messageRoles)].map((node) => {
         const content = node.querySelector(selectors.markdown) || node;
@@ -194,10 +247,18 @@ class ChatGPTAdapter {
       }),
     }), { selectors });
     await this.checkResponses();
-    if (new URL(this.page.url()).pathname !== `/c/${id}`) throw new Error("Conversation navigation changed; stopped");
-    const record = { provider: "chatgpt", conversationId: id, title: data.title, url, extractedAt: new Date().toISOString(), messages: data.messages };
+    const record = { provider: "chatgpt", conversationId: id, title: data.title, url: data.url, extractedAt: new Date().toISOString(), messages: data.messages };
+    if (!isCompleteConversationRecord(record, id) || !isCompleteConversationRecord({ ...record, url: this.page.url() }, id)) {
+      throw new Error("Incomplete conversation snapshot or changed navigation; checkpoint unchanged");
+    }
     this.writeJson(target, record);
     return record;
+  }
+
+  readConversationCheckpoint(id) {
+    if (typeof id !== "string" || !/^[A-Za-z0-9_-]+$/.test(id)) throw new Error("Invalid conversation ID");
+    try { return this.readJson(path.join(this.paths.raw, "conversations", `${id}.json`)); }
+    catch (error) { if (error instanceof SyntaxError) return null; throw error; }
   }
 
   readJson(target) {
@@ -217,8 +278,16 @@ class ChatGPTAdapter {
 
   async close() {
     if (this.page && this.responseListener) this.page.off("response", this.responseListener);
+    if (this.page) {
+      this.page.off("request", this.requestListener);
+      this.page.off("requestfinished", this.requestFinishedListener);
+      this.page.off("requestfailed", this.requestFailedListener);
+    }
     try { await this.browser.close(); await Promise.all([...this.pending]); }
-    finally { this.page = null; this.fingerprint = null; this.failure = null; this.authRequired = false; this.items = []; }
+    finally {
+      this.page = null; this.fingerprint = null; this.failure = null; this.authRequired = false; this.items = [];
+      this.discoveryFailure = null; this.validListResponses = 0; this.listRequests.clear(); this.lastFingerprint = null;
+    }
   }
 }
 
