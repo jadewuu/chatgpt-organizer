@@ -4,6 +4,7 @@ const fs = require("node:fs");
 const os = require("node:os");
 const path = require("node:path");
 const { runDoctor } = require("../src/commands/doctor");
+const { createPaths } = require("../src/core/paths");
 const { main } = require("../src/cli");
 
 function outputBuffer() {
@@ -131,4 +132,41 @@ test("returns a failed writable check for incomplete path contracts", async () =
   const checks = await runDoctor({ paths: { local: "/tmp/private" } });
   assert.equal(checks.find((check) => check.name === "paths").status, "fail");
   assert.equal(checks.find((check) => check.name === "writable").status, "fail");
+});
+
+test("fails writable check when .local is a file", async (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "chatgpt-organizer-doctor-"));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  fs.writeFileSync(path.join(root, ".local"), "not a directory");
+  const checks = await runDoctor({ rootDir: root, chromeExists: true, privatePathsIgnored: true });
+  assert.equal(checks.find((check) => check.name === "writable").status, "fail");
+});
+
+test("fails writable check when a required local directory is a file", async (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "chatgpt-organizer-doctor-"));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const paths = createPaths(root);
+  fs.mkdirSync(paths.local);
+  fs.writeFileSync(paths.profile, "not a directory");
+  const checks = await runDoctor({ rootDir: root, paths, chromeExists: true, privatePathsIgnored: true });
+  assert.equal(checks.find((check) => check.name === "writable").status, "fail");
+});
+
+test("fails Chrome check when configured path is a directory", async (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "chatgpt-organizer-doctor-"));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const executable = path.join(root, "chrome");
+  fs.mkdirSync(executable);
+  const checks = await runDoctor({ rootDir: root, platform: "darwin", chromeExecutable: executable, privatePathsIgnored: true });
+  assert.equal(checks.find((check) => check.name === "chrome").status, "fail");
+});
+
+test("fails Chrome check when configured file is not executable", async (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "chatgpt-organizer-doctor-"));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const executable = path.join(root, "chrome");
+  fs.writeFileSync(executable, "not executable", { mode: 0o644 });
+  fs.chmodSync(executable, 0o644);
+  const checks = await runDoctor({ rootDir: root, platform: "darwin", chromeExecutable: executable, privatePathsIgnored: true });
+  assert.equal(checks.find((check) => check.name === "chrome").status, "fail");
 });

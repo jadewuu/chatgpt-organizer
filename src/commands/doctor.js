@@ -32,13 +32,23 @@ function chromeCheck(deps, platform) {
   const executable = deps.chromeExecutable
     || process.env.ORGANIZER_CHROME_EXECUTABLE
     || (platform === "darwin" ? defaultChromeExecutable : "google-chrome");
-  const exists = typeof deps.chromeExists === "boolean" ? deps.chromeExists : fs.existsSync(executable);
+  const exists = typeof deps.chromeExists === "boolean" ? deps.chromeExists : isExecutableFile(executable);
   const [status, message] = statusFromBoolean(
     exists,
     `Chrome executable found at ${executable}`,
     `Chrome executable not found at ${executable}`,
   );
   return check("chrome", status, message);
+}
+
+function isExecutableFile(target) {
+  try {
+    if (!fs.statSync(target).isFile()) return false;
+    fs.accessSync(target, fs.constants.X_OK);
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 function pathsCheck(paths) {
@@ -120,6 +130,7 @@ function canWrite(target) {
     current = parent;
   }
   try {
+    if (!fs.statSync(current).isDirectory()) return false;
     fs.accessSync(current, fs.constants.W_OK);
     return true;
   } catch {
