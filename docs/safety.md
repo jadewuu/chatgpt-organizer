@@ -6,6 +6,10 @@ All user-derived data belongs under the Git-ignored `.local/` directory, includi
 
 Use a dedicated Chrome profile for this workflow. Authenticate manually only when the repository command requests it. Never copy cookies, session tokens, profile data, or conversation content into tracked files or bug reports.
 
+## Reasoning and service ownership
+
+Semantic reasoning comes from the user's own Codex or Claude Code session. The repository has no maintainer-owned API key, hosted backend, or maintainer-operated data service.
+
 ## Permanent limits
 
 Deleting conversations or Projects is unsupported. The adapter and public command interface have no delete operation. `doctor` and `plan` are read-only; creating Projects, moving chats, and archiving chats require exact approval of the generated plan. The first write run is limited to five actions, and full apply requires a verified pilot plus separate approval.

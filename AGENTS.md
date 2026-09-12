@@ -8,3 +8,6 @@
 - Never improvise browser clicks. Use only repository commands and the ChatGPT adapter.
 - Never stage `.local/`, legacy data, profiles, logs, screenshots, plans, or conversation identifiers.
 - Read `docs/workflow.md` and `docs/safety.md` before operating on a user's account.
+- Semantic reasoning comes from the user's own Codex or Claude Code session.
+- The repository has no maintainer-owned API key, hosted backend, or maintainer-operated data service.
+- Codex and Claude Code are supported agent runtimes for this repository, but this does not provide Claude Web history or provider compatibility.

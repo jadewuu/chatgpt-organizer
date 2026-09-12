@@ -5,6 +5,8 @@ description: Use when asked to organize, classify, move, archive, or review Chat
 
 Read `AGENTS.md`, `docs/workflow.md`, and `docs/safety.md` before operating on a user's account. Follow the repository contract over convenience or speed.
 
+Semantic reasoning comes from the user's own Codex or Claude Code session. The repository has no maintainer-owned API key, hosted backend, or maintainer-operated data service. Codex and Claude Code are supported agent runtimes for this repository, but this does not provide Claude Web history or provider compatibility.
+
 1. Run `pnpm organizer doctor` and report failures.
 2. Use `pnpm organizer login` only when authentication is required.
 3. Run `pnpm organizer plan`; keep all actions read-only.
