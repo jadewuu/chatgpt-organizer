@@ -4,7 +4,7 @@
   "required": ["provider", "generatedAt", "taxonomyHash", "projects", "items", "planHash"],
   "additionalProperties": false,
   "properties": {
-    "provider": { "type": "string", "minLength": 1 },
+    "provider": { "const": "chatgpt" },
     "generatedAt": { "type": "string", "minLength": 1 },
     "taxonomyHash": { "type": "string", "minLength": 1 },
     "projects": {
@@ -31,6 +31,7 @@
           "confidence",
           "reason",
           "suggestedAction",
+          "action",
           "title",
           "url",
           "currentProject",
@@ -48,6 +49,8 @@
           "confidence": { "type": "number", "minimum": 0, "maximum": 1 },
           "reason": { "type": "string", "minLength": 1 },
           "suggestedAction": { "enum": ["move", "archive", "keep"] },
+          "action": { "enum": ["move", "archive", "keep"] },
+          "archiveReason": { "type": "string", "minLength": 1 },
           "title": { "type": "string", "minLength": 1 },
           "url": { "type": "string", "minLength": 1 },
           "currentProject": {
@@ -56,8 +59,26 @@
               { "type": "null" }
             ]
           },
-          "status": { "type": "string", "minLength": 1 }
-        }
+          "status": {
+            "enum": ["proposed", "unresolved", "pending", "running", "done", "failed", "skipped", "uncertain"]
+          }
+        },
+        "allOf": [
+          {
+            "if": {
+              "properties": { "suggestedAction": { "const": "archive" } },
+              "required": ["suggestedAction"]
+            },
+            "then": { "required": ["archiveReason"] }
+          },
+          {
+            "if": {
+              "properties": { "action": { "const": "archive" } },
+              "required": ["action"]
+            },
+            "then": { "required": ["archiveReason"] }
+          }
+        ]
       }
     },
     "planHash": { "type": "string", "minLength": 1 }

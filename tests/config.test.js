@@ -22,3 +22,40 @@ test("never enables deletion from configuration", (t) => {
   const config = loadConfig(filePath);
   assert.equal(config.actions.neverDelete, true);
 });
+
+test("rejects providers other than chatgpt", (t) => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "chatgpt-organizer-config-"));
+  t.after(() => fs.rmSync(directory, { recursive: true, force: true }));
+  const filePath = path.join(directory, "organizer.yaml");
+  fs.writeFileSync(filePath, "provider: claude\n");
+  assert.throws(() => loadConfig(filePath), /provider/);
+});
+
+test("rejects unsafe classification thresholds", (t) => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "chatgpt-organizer-config-"));
+  t.after(() => fs.rmSync(directory, { recursive: true, force: true }));
+  for (const [key, value] of [
+    ["moveThreshold", "-0.01"],
+    ["moveThreshold", "1.01"],
+    ["moveThreshold", '"0.95"'],
+    ["fullContentBelow", ".inf"],
+  ]) {
+    const filePath = path.join(directory, `${key}-${value.replaceAll(/[^a-z0-9]/gi, "-")}.yaml`);
+    fs.writeFileSync(filePath, `classification:\n  ${key}: ${value}\n`);
+    assert.throws(() => loadConfig(filePath), new RegExp(key));
+  }
+});
+
+test("rejects malformed configuration sections", (t) => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "chatgpt-organizer-config-"));
+  t.after(() => fs.rmSync(directory, { recursive: true, force: true }));
+  for (const [section, value] of [
+    ["classification", "[]"],
+    ["actions", "false"],
+    ["taxonomy", "[]"],
+  ]) {
+    const filePath = path.join(directory, `${section}.yaml`);
+    fs.writeFileSync(filePath, `${section}: ${value}\n`);
+    assert.throws(() => loadConfig(filePath), new RegExp(section));
+  }
+});

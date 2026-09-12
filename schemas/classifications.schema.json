@@ -15,7 +15,15 @@
       },
       "confidence": { "type": "number", "minimum": 0, "maximum": 1 },
       "reason": { "type": "string", "minLength": 1 },
-      "suggestedAction": { "enum": ["move", "archive", "keep"] }
-    }
+      "suggestedAction": { "enum": ["move", "archive", "keep"] },
+      "archiveReason": { "type": "string", "minLength": 1 }
+    },
+    "allOf": [{
+      "if": {
+        "properties": { "suggestedAction": { "const": "archive" } },
+        "required": ["suggestedAction"]
+      },
+      "then": { "required": ["archiveReason"] }
+    }]
   }
 }
