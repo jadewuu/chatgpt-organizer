@@ -1,0 +1,4 @@
+[
+  { "id": "fixture-chat-1", "title": "Synthetic planning chat", "create_time": 1700000000, "update_time": 1700000100 },
+  { "id": "fixture-chat-2-full-id", "title": "Synthetic project chat", "create_time": 1700000200, "update_time": 1700000300, "gizmo_id": "fixture-project" }
+]

@@ -2,13 +2,15 @@
 
 const commandLoaders = new Map([
   ["doctor", () => require("./commands/doctor")],
+  ["login", () => require("./commands/login")],
+  ["discover", () => require("./commands/discover")],
   ["plan", () => require("./commands/plan")],
   ["apply", () => require("./commands/apply")],
   ["verify", () => require("./commands/verify")],
   ["clean:data", () => require("./commands/clean-data")],
 ]);
 
-const usage = "Usage: pnpm organizer <doctor|plan|apply|verify|clean:data>\n";
+const usage = "Usage: pnpm organizer <doctor|plan|apply|verify|clean:data|login|discover>\n";
 
 function write(stream, message) {
   if (stream && typeof stream.write === "function") stream.write(message);
@@ -63,7 +65,19 @@ async function main(argv = process.argv.slice(2), deps = {}) {
   }
 
   try {
-    const code = await command.run(args.slice(1), { ...deps, stdout, stderr });
+    const commandDeps = { ...deps, stdout, stderr };
+    if (name === "doctor" && args.includes("--browser") && !deps.browserCheck && !deps.runBrowserChecks) {
+      commandDeps.browserCheck = async () => {
+        const { ChatGPTAdapter } = require("./providers/chatgpt/adapter");
+        const { createPaths } = require("./core/paths");
+        const adapter = deps.adapter || new ChatGPTAdapter({ paths: deps.paths || createPaths(deps.rootDir), chromeExecutable: deps.chromeExecutable });
+        try {
+          await adapter.login({ timeoutMs: 0 });
+          return [{ name: "browser", status: "ok", message: "Dedicated profile account verified" }];
+        } finally { await adapter.close(); }
+      };
+    }
+    const code = await command.run(args.slice(1), commandDeps);
     return Number.isInteger(code) ? code : 0;
   } catch (error) {
     write(stderr, `Command "${name}" failed: ${error.message}\n`);
