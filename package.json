@@ -1,0 +1,16 @@
+{
+  "name": "chatgpt-organizer",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Agent-native organizer for ChatGPT conversation history",
+  "engines": { "node": ">=20" },
+  "scripts": {
+    "login": "node scripts/02-login.js",
+    "discover": "node scripts/01-discover.js",
+    "test": "node --test",
+    "privacy:audit": "node scripts/privacy-audit.js"
+  },
+  "dependencies": {
+    "playwright": "^1.62.1"
+  }
+}
