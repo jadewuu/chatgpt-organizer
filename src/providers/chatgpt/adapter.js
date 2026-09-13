@@ -231,7 +231,6 @@ class ChatGPTAdapter {
         return {
           url: location.href,
           uncertain,
-          expanded: region.getAttribute("aria-expanded") === "true",
           emptyState: [...region.querySelectorAll(selectors.projectStatus)].filter(visible).some((node) => new RegExp(noProjects, "i").test((node.innerText || "").trim())),
           entries: [...region.querySelectorAll(selectors.projectLinks)].filter(visible).map((node) => ({ name: node.innerText, url: node.href })),
         };
@@ -241,7 +240,7 @@ class ChatGPTAdapter {
       if (!snapshot || snapshot.uncertain || new URL(snapshot.url).origin !== "https://chatgpt.com") {
         throw new Error("Project region is missing, ambiguous, collapsed, or uncertain; inventory unchanged");
       }
-      if ((!snapshot.entries.length && !snapshot.expanded && !snapshot.emptyState) || (snapshot.entries.length && snapshot.emptyState)) {
+      if ((!snapshot.entries.length && !snapshot.emptyState) || (snapshot.entries.length && snapshot.emptyState)) {
         throw new Error("Project empty state is uncertain; inventory unchanged");
       }
       const names = new Map();

@@ -321,11 +321,11 @@ test("Project listing excludes CSS-hidden entries", async (t) => {
   assert.deepEqual(await adapter.listProjects(), [{ name: "Visible synthetic project", url: "https://chatgpt.com/g/g-p-fixture-visible/project" }]);
 });
 
-test("accepts an empty Projects inventory only with a stable expanded region or explicit empty state", async (t) => {
-  for (const explicit of [false, true]) {
+test("accepts an empty Projects inventory only with a stable explicit bilingual empty state", async (t) => {
+  for (const status of ["No projects yet", "暂无项目"]) {
     const { adapter, projectUI } = setup(t);
     projectUI.entries = [];
-    if (explicit) { projectUI.expanded = null; projectUI.status = "暂无项目"; }
+    projectUI.status = status;
     assert.deepEqual(await adapter.listProjects(), []);
   }
 });
@@ -338,6 +338,7 @@ for (const [name, change] of [
   ["error or uncertain state", { uncertain: true }],
   ["unobserved additional entries", { more: true }],
   ["unverified empty region", { entries: [], expanded: null }],
+  ["expanded but unrendered empty region", { entries: [], expanded: "true" }],
   ["empty project name", { entries: [{ name: "  ", url: "https://chatgpt.com/g/g-p-fixture/project" }] }],
   ["unsupported project URL", { entries: [{ name: "Synthetic", url: "https://example.invalid/g/g-p-fixture/project" }] }],
 ]) {
@@ -390,4 +391,19 @@ test("discover persists validated Projects atomically and preserves a prior inve
   fs.writeFileSync(priorTarget, prior);
   assert.equal(await main(["discover", "--max", "1"], { ...failure, stdout: output, stderr: output }), 1);
   assert.equal(fs.readFileSync(priorTarget, "utf8"), prior);
+});
+
+test("discover preserves the exact prior Projects inventory when an expanded region has no empty-state marker", async (t) => {
+  const { adapter, paths, projectUI } = setup(t);
+  projectUI.entries = [];
+  projectUI.expanded = "true";
+  projectUI.status = "";
+  const target = path.join(paths.raw, "projects.json");
+  const prior = '[\n  {"name":"Synthetic prior","url":"https://chatgpt.com/g/g-p-fixture-prior/project"}\n]\n';
+  fs.mkdirSync(paths.raw, { recursive: true });
+  fs.writeFileSync(target, prior);
+  const output = { write() {} };
+  assert.equal(await main(["discover", "--max", "1"], { adapter, paths, stdout: output, stderr: output }), 1);
+  assert.equal(fs.readFileSync(target, "utf8"), prior);
+  assert.equal(fs.existsSync(`${target}.tmp`), false);
 });
