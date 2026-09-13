@@ -6,6 +6,7 @@ const { loadConfig } = require("../core/config");
 const { validateTaxonomy, validateClassifications } = require("../core/validate");
 const { loadRunState, saveRunState, transitionState } = require("../core/state");
 const { buildClassificationInput, buildMigrationPlan } = require("../core/planner");
+const { renderReviewHtml } = require("../reports/review");
 
 function readJson(filePath) {
   try { return JSON.parse(fs.readFileSync(filePath, "utf8")); }
@@ -21,6 +22,21 @@ function writePrivate(paths, target, content) {
   if (absolute !== plans && !absolute.startsWith(`${plans}${path.sep}`)) throw new Error("Refusing plan artifact outside .local/plans");
   fs.mkdirSync(plans, { recursive: true, mode: 0o700 });
   fs.chmodSync(plans, 0o700);
+  const temporary = `${absolute}.tmp`;
+  fs.writeFileSync(temporary, content, { mode: 0o600 });
+  fs.chmodSync(temporary, 0o600);
+  fs.renameSync(temporary, absolute);
+  fs.chmodSync(absolute, 0o600);
+}
+
+function writePrivateReport(paths, target, content) {
+  const reports = path.resolve(paths.reports);
+  const absolute = path.resolve(target);
+  if (absolute === reports || !absolute.startsWith(`${reports}${path.sep}`)) {
+    throw new Error("Refusing report artifact outside .local/reports");
+  }
+  fs.mkdirSync(reports, { recursive: true, mode: 0o700 });
+  fs.chmodSync(reports, 0o700);
   const temporary = `${absolute}.tmp`;
   fs.writeFileSync(temporary, content, { mode: 0o600 });
   fs.chmodSync(temporary, 0o600);
@@ -144,6 +160,7 @@ async function run(argv = [], deps = {}) {
   const inputPath = path.join(plans, "classification-input.jsonl");
   const classificationsPath = path.join(plans, "classifications.json");
   const planPath = path.join(plans, "migration-plan.json");
+  const reportPath = path.resolve(paths.reports, "review.html");
   const config = loadEffectiveConfig(rootDir, deps);
 
   if (state.phase === "DISCOVER") {
@@ -209,12 +226,14 @@ async function run(argv = [], deps = {}) {
 
   const plan = buildMigrationPlan(conversations, classifications, effectiveConfig, existingProjects, { now: deps.now });
   writePrivate(paths, planPath, `${JSON.stringify(plan, null, 2)}\n`);
+  const writeReport = deps.writeReviewReport || deps.writeReport || writePrivateReport;
+  writeReport(paths, reportPath, renderReviewHtml({ plan, taxonomy }));
   transitionState(state, "PLAN_REVIEW");
   saveRunState(paths, state);
   const phase = state.phase;
-  const message = `Wrote .local/plans/migration-plan.json; phase is ${phase}. Review the plan before any approval.`;
+  const message = `Wrote .local/plans/migration-plan.json and ${reportPath}; no ChatGPT changes were made. Phase is ${phase}. Review the plan before any approval.`;
   (deps.stdout || process.stdout).write(`${message}\n`);
   return 0;
 }
 
-module.exports = { run, writePrivate, readExtracted, readClassificationInput };
+module.exports = { run, writePrivate, writePrivateReport, readExtracted, readClassificationInput };
