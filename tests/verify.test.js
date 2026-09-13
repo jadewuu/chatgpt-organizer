@@ -24,7 +24,7 @@ function item(id, changes = {}) {
     title: `Fixture ${id}`,
     url: `https://chatgpt.com/c/${id}`,
     currentProject: null,
-    status: "pending",
+    status: "proposed",
     ...changes,
   };
 }
@@ -57,10 +57,11 @@ function fixture(t, { approvedPlan, phase = "PILOT", entries, stateChanges = {} 
   fs.mkdirSync(paths.plans, { recursive: true, mode: 0o700 });
   fs.mkdirSync(paths.state, { recursive: true, mode: 0o700 });
   fs.writeFileSync(path.join(paths.plans, "migration-plan.json"), `${JSON.stringify(approvedPlan)}\n`, { mode: 0o600 });
-  fs.writeFileSync(path.join(paths.state, "account.json"), '{"accountFingerprint":"account-fixture"}\n', { mode: 0o600 });
+  fs.writeFileSync(path.join(paths.state, "account.json"), '{"accountFingerprint":"account-fixture","workspaceFingerprint":"workspace-fixture"}\n', { mode: 0o600 });
   const runState = {
     runId: "run-fixture",
     accountFingerprint: "account-fixture",
+    workspaceFingerprint: "workspace-fixture",
     phase,
     planHash: approvedPlan.planHash,
     approvals: {
@@ -75,14 +76,19 @@ function fixture(t, { approvedPlan, phase = "PILOT", entries, stateChanges = {} 
 }
 
 class VerifyAdapter {
-  constructor({ projects = ["Work"], results = {}, fingerprint = "account-fixture" } = {}) {
+  constructor({ projects = ["Work"], results = {}, fingerprint = "account-fixture", workspaceFingerprint = "workspace-fixture" } = {}) {
     this.projects = projects;
     this.results = results;
     this.fingerprint = fingerprint;
+    this.workspaceFingerprint = workspaceFingerprint;
     this.calls = [];
     this.closed = false;
   }
-  async getAccountFingerprint() { this.calls.push(["fingerprint"]); return this.fingerprint; }
+  async getAccountFingerprint(options = {}) {
+    this.calls.push(["fingerprint", options.workspaceFingerprint]);
+    if (options.workspaceFingerprint !== this.workspaceFingerprint) throw new Error("Workspace fingerprint mismatch");
+    return this.fingerprint;
+  }
   async listProjects() { this.calls.push(["projects"]); return this.projects.map((name) => ({ name, url: "https://chatgpt.com/g/g-p-fixture/project" })); }
   async verifyConversationLocation(id, expected) {
     this.calls.push(["conversation", id, expected]);
@@ -110,7 +116,7 @@ test("verified pilot checks every done write, skips keep items, and advances to 
   const code = await run([], { paths, createAdapter: () => adapter, stdout: { write: (value) => output.push(value) } });
   assert.equal(code, 0);
   assert.deepEqual(adapter.calls, [
-    ["fingerprint"], ["projects"],
+    ["fingerprint", "workspace-fixture"], ["projects"],
     ["conversation", "fixture-move", "Work"],
     ["conversation", "fixture-archive", "archived"],
   ]);
@@ -202,6 +208,38 @@ test("plan, account, progress, and interrupted-state mismatches fail before adap
     assert.equal(constructions, 0, scenario);
     assert.equal(loadRunState(paths).phase, "PILOT");
   }
+});
+
+test("verify rejects plan lifecycle status and workspace context mismatch before adapter construction", async (t) => {
+  for (const scenario of ["plan-status", "missing-workspace", "changed-workspace"]) {
+    const move = item("fixture-context", scenario === "plan-status" ? { status: "done" } : {});
+    const approvedPlan = plan([move]);
+    const { paths } = fixture(t, { approvedPlan, entries: { [keyFor(move)]: { status: "done" } } });
+    if (scenario !== "plan-status") {
+      const accountPath = path.join(paths.state, "account.json");
+      const account = JSON.parse(fs.readFileSync(accountPath, "utf8"));
+      if (scenario === "missing-workspace") delete account.workspaceFingerprint;
+      else account.workspaceFingerprint = "different-workspace";
+      fs.writeFileSync(accountPath, `${JSON.stringify(account)}\n`);
+    }
+    let constructions = 0;
+    await assert.rejects(run([], {
+      paths,
+      createAdapter() { constructions++; return new VerifyAdapter(); },
+      stdout: { write() {} },
+    }), /status|proposed|workspace|account context/i);
+    assert.equal(constructions, 0, scenario);
+  }
+});
+
+test("verify compares the persisted workspace with live adapter context before observations", async (t) => {
+  const move = item("fixture-live-workspace");
+  const approvedPlan = plan([move]);
+  const { paths } = fixture(t, { approvedPlan, entries: { [keyFor(move)]: { status: "done" } } });
+  const adapter = new VerifyAdapter({ workspaceFingerprint: "other-workspace" });
+  await assert.rejects(run([], { paths, createAdapter: () => adapter, stdout: { write() {} } }), /workspace/i);
+  assert.deepEqual(adapter.calls, [["fingerprint", "workspace-fixture"]]);
+  assert.equal(loadRunState(paths).phase, "PILOT");
 });
 
 test("pilot verification rejects progress claiming more than five completed writes", async (t) => {

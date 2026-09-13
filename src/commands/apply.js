@@ -4,7 +4,7 @@ const { appendAudit } = require("../core/audit");
 const { DEFAULT_RESUME_MAX_ACTIONS, runApply, validateApplyRequest } = require("../core/apply-engine");
 const { loadConfig } = require("../core/config");
 const { createPaths } = require("../core/paths");
-const { loadRunState, saveRunState, transitionState } = require("../core/state");
+const { loadRunState, saveRunState, transitionState, validatePersistedAccountContext } = require("../core/state");
 
 function parseArguments(argv) {
   if (!Array.isArray(argv)) throw new Error("apply arguments must be an array");
@@ -59,6 +59,7 @@ async function run(argv = [], deps = {}) {
   const config = effectiveConfig(rootDir, deps);
   const prePhase = mode === "pilot" ? "PLAN_REVIEW" : "APPLY_APPROVAL";
   const validation = validateApplyRequest({ plan: approvedPlan, state, approvalHash, config, mode, phases: [prePhase] });
+  validatePersistedAccountContext(paths, state);
   if (validation.progress.hasUncertain) {
     throw new Error("Apply progress contains a running or uncertain action; manual review is required");
   }
@@ -73,7 +74,7 @@ async function run(argv = [], deps = {}) {
       const { ChatGPTAdapter } = require("../providers/chatgpt/adapter");
       adapter = new ChatGPTAdapter({ paths, chromeExecutable: deps.chromeExecutable });
     }
-    const actualFingerprint = await adapter.getAccountFingerprint();
+    const actualFingerprint = await adapter.getAccountFingerprint({ workspaceFingerprint: state.workspaceFingerprint });
     if (actualFingerprint !== state.accountFingerprint) throw new Error("Account fingerprint mismatch; zero actions performed");
 
     state.approvals ||= {};

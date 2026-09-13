@@ -11,6 +11,14 @@ function isListUrl(value) {
   return url.origin === "https://chatgpt.com" && url.pathname === "/backend-api/conversations";
 }
 
+function conversationResponseId(value) {
+  let url;
+  try { url = new URL(value); } catch { return null; }
+  if (url.origin !== "https://chatgpt.com") return null;
+  const match = url.pathname.match(/^\/backend-api\/conversation\/([A-Za-z0-9_-]+)$/);
+  return match ? match[1] : null;
+}
+
 function writeResult(status, evidence) {
   return { status, evidence };
 }
@@ -60,6 +68,10 @@ class ChatGPTAdapter {
     this.listRequests = new Set();
     this.writeFingerprint = null;
     this.writeWorkspaceDigest = null;
+    this.workspaceFingerprint = null;
+    this.targetConversationLoad = null;
+    this.loadedConversationEvidence = null;
+    this.conversationLoadRevision = 0;
   }
 
   async open() {
@@ -72,7 +84,13 @@ class ChatGPTAdapter {
       this.pending.add(pending);
     };
     this.page.on("response", this.responseListener);
-    this.requestListener = (request) => { if (isListUrl(request.url())) this.listRequests.add(request); };
+    this.requestListener = (request) => {
+      if (isListUrl(request.url())) this.listRequests.add(request);
+      const conversationId = conversationResponseId(request.url());
+      if (conversationId && this.targetConversationLoad?.id === conversationId) {
+        this.targetConversationLoad.requests.add(request);
+      }
+    };
     this.requestFinishedListener = (request) => this.listRequests.delete(request);
     this.requestFailedListener = (request) => {
       if (isListUrl(request.url())) this.discoveryFailure = new Error("Discovery list request failed; inventory unchanged");
@@ -94,6 +112,12 @@ class ChatGPTAdapter {
     if (response.status() === 429) this.failure = new Error("Rate limit detected; stopped");
     if (response.status() === 403) this.failure = new Error("Access restriction detected; stopped");
     if (response.status() === 401) this.authRequired = true;
+    const conversationId = conversationResponseId(response.url());
+    if (conversationId && response.status() === 200 && this.targetConversationLoad?.id === conversationId) {
+      let request;
+      try { request = response.request(); } catch { request = null; }
+      if (request && this.targetConversationLoad.requests.has(request)) this.targetConversationLoad.observed = true;
+    }
     if (list) {
       if (response.status() !== 200) {
         this.discoveryFailure = new Error("Discovery list response has an unexpected HTTP status; inventory unchanged");
@@ -171,7 +195,31 @@ class ChatGPTAdapter {
     throw new Error("Login required: run pnpm organizer login and sign in manually in the dedicated profile");
   }
 
-  async getAccountFingerprint() {
+  async #observeWorkspaceFingerprint() {
+    const observe = async () => {
+      const snapshot = await this.page.evaluate(({ command, selector }) => {
+        const visible = (node) => node.getClientRects().length > 0
+          && !["hidden", "collapse"].includes(getComputedStyle(node).visibility)
+          && getComputedStyle(node).opacity !== "0";
+        const markers = [...document.querySelectorAll(selector)].filter(visible)
+          .map((node) => (node.innerText || node.textContent || "").normalize("NFC").trim()).filter(Boolean);
+        return { command, url: location.href, markers };
+      }, { command: "workspaceContext", selector: selectors.workspaceContext });
+      let url;
+      try { url = new URL(snapshot?.url); } catch { throw new Error("Workspace context URL is unavailable"); }
+      if (url.origin !== "https://chatgpt.com" || snapshot.markers?.length !== 1) {
+        throw new Error("Workspace context is missing or ambiguous");
+      }
+      return createHash("sha256").update(snapshot.markers[0]).digest("hex");
+    };
+    const first = await observe();
+    await this.page.waitForTimeout(500);
+    const second = await observe();
+    if (first !== second) throw new Error("Workspace context changed between observations");
+    return second;
+  }
+
+  async getAccountFingerprint({ workspaceFingerprint } = {}) {
     await this.open();
     await this.checkResponses();
     for (let i = 0; !this.fingerprint && i < 30; i++) {
@@ -179,10 +227,18 @@ class ChatGPTAdapter {
       await this.checkResponses();
     }
     if (!this.fingerprint) throw new Error("Stable account context unavailable; login verification stopped");
+    const liveWorkspaceFingerprint = await this.#observeWorkspaceFingerprint();
+    if (workspaceFingerprint && workspaceFingerprint !== liveWorkspaceFingerprint) throw new Error("Workspace mismatch; stopped");
+    if (this.workspaceFingerprint && this.workspaceFingerprint !== liveWorkspaceFingerprint) throw new Error("Workspace context changed; stopped");
+    this.workspaceFingerprint = liveWorkspaceFingerprint;
+    this.writeWorkspaceDigest = liveWorkspaceFingerprint;
     const target = path.join(this.paths.state, "account.json");
     const previous = this.readJson(target);
-    if (previous && previous.accountFingerprint !== this.fingerprint) throw new Error("Account mismatch; stopped");
-    this.writeJson(target, { accountFingerprint: this.fingerprint });
+    if (previous && (previous.accountFingerprint !== this.fingerprint
+      || previous.workspaceFingerprint && previous.workspaceFingerprint !== liveWorkspaceFingerprint)) {
+      throw new Error("Account or workspace mismatch; stopped");
+    }
+    this.writeJson(target, { accountFingerprint: this.fingerprint, workspaceFingerprint: liveWorkspaceFingerprint });
     return this.fingerprint;
   }
 
@@ -329,15 +385,14 @@ class ChatGPTAdapter {
       if (snapshot.loginRequired) return writeResult("access_restricted", "Login is required");
       if (patterns.rateLimit.test(snapshot.text || "")) return writeResult("rate_limited", "Rate limit detected");
       if (patterns.accessRestriction.test(snapshot.text || "")) return writeResult("access_restricted", "Access restriction detected");
-      const markers = [...new Set((snapshot.workspaceMarkers || []).map((value) => value.normalize("NFC").trim()).filter(Boolean))];
-      if (markers.length > 1) return writeResult("uncertain", "Workspace context is ambiguous");
-      if (markers.length === 1) {
-        const digest = createHash("sha256").update(markers[0]).digest("hex");
-        if (this.writeWorkspaceDigest && this.writeWorkspaceDigest !== digest) {
-          return writeResult("access_restricted", "Workspace context changed");
-        }
-        this.writeWorkspaceDigest = digest;
+      const markers = (snapshot.workspaceMarkers || []).map((value) => value.normalize("NFC").trim()).filter(Boolean);
+      if (markers.length !== 1) return writeResult("uncertain", "Workspace context is missing or ambiguous");
+      const digest = createHash("sha256").update(markers[0]).digest("hex");
+      if ((this.workspaceFingerprint && this.workspaceFingerprint !== digest)
+        || (this.writeWorkspaceDigest && this.writeWorkspaceDigest !== digest)) {
+        return writeResult("access_restricted", "Workspace context changed");
       }
+      this.writeWorkspaceDigest = digest;
       return writeResult("verified", "Safety context verified");
     } catch (error) {
       return mapWriteError(error);
@@ -348,7 +403,7 @@ class ChatGPTAdapter {
     const before = await this.detectSafetyStop();
     if (before.status !== "verified") return before;
     try {
-      const fingerprint = await this.getAccountFingerprint();
+      const fingerprint = await this.getAccountFingerprint({ workspaceFingerprint: this.writeWorkspaceDigest });
       if (this.writeFingerprint && this.writeFingerprint !== fingerprint) {
         return writeResult("access_restricted", "Account context changed");
       }
@@ -426,20 +481,55 @@ class ChatGPTAdapter {
     const safety = await this.detectSafetyStop();
     if (safety.status !== "verified") return safety;
     const target = `https://chatgpt.com/c/${id}`;
+    const load = { id, revision: ++this.conversationLoadRevision, observed: false, requests: new Set() };
+    this.loadedConversationEvidence = null;
+    this.targetConversationLoad = load;
     try { await this.page.evaluate((url) => { location.href = url; }, target); }
     catch (error) { if (!/execution context was destroyed|navigation/i.test(error.message)) return mapWriteError(error); }
-    await this.page.waitForTimeout(500);
+    for (let attempt = 0; attempt < 30 && !load.observed; attempt++) {
+      await this.page.waitForTimeout(100);
+      while (this.pending.size) await Promise.all([...this.pending]);
+    }
+    if (this.targetConversationLoad !== load || !load.observed) {
+      return writeResult("uncertain", "Fresh target conversation response was not observed");
+    }
     const after = await this.detectSafetyStop();
     if (after.status !== "verified") return after;
-    let current;
-    try { current = new URL(this.page.url()); } catch { return writeResult("uncertain", "Conversation URL is unavailable"); }
-    if (current.origin !== "https://chatgpt.com" || current.pathname !== `/c/${id}`) {
-      return writeResult("uncertain", "Requested conversation did not load");
+    const observe = async () => {
+      try {
+        return await this.page.evaluate(({ command, selector }) => {
+          const visible = (node) => node.getClientRects().length > 0
+            && !["hidden", "collapse"].includes(getComputedStyle(node).visibility)
+            && getComputedStyle(node).opacity !== "0";
+          const markers = [...document.querySelectorAll(selector)].filter(visible)
+            .filter((node) => (node.innerText || node.textContent || "").normalize("NFC").trim());
+          return { command, url: location.href, rendered: markers.length > 0, markerCount: markers.length };
+        }, { command: "targetConversation", selector: selectors.renderedConversation });
+      } catch (error) { return { error: mapWriteError(error) }; }
+    };
+    const first = await observe();
+    await this.page.waitForTimeout(500);
+    const second = await observe();
+    if (first.error) return first.error;
+    if (second.error) return second.error;
+    const valid = (snapshot) => {
+      let current;
+      try { current = new URL(snapshot?.url); } catch { return false; }
+      return current.origin === "https://chatgpt.com" && current.pathname === `/c/${id}`
+        && snapshot.rendered === true && Number.isInteger(snapshot.markerCount) && snapshot.markerCount > 0;
+    };
+    if (!valid(first) || !valid(second) || JSON.stringify(first) !== JSON.stringify(second)) {
+      return writeResult("uncertain", "Requested conversation render is missing or unstable");
     }
+    this.loadedConversationEvidence = { id, revision: load.revision };
     return writeResult("verified", "Conversation loaded by full ID");
   }
 
   async #observeConversationLocation(id, expected) {
+    if (this.loadedConversationEvidence?.id !== id
+      || this.loadedConversationEvidence.revision !== this.targetConversationLoad?.revision) {
+      return writeResult("uncertain", "Fresh target conversation evidence is unavailable");
+    }
     const safety = await this.detectSafetyStop();
     if (safety.status !== "verified") return safety;
     let snapshot;
@@ -614,7 +704,8 @@ class ChatGPTAdapter {
     }
     try { await this.browser.close(); await Promise.all([...this.pending]); }
     finally {
-      this.page = null; this.fingerprint = null; this.failure = null; this.authRequired = false; this.items = [];
+      this.page = null; this.fingerprint = null; this.workspaceFingerprint = null; this.failure = null; this.authRequired = false; this.items = [];
+      this.targetConversationLoad = null; this.loadedConversationEvidence = null;
       this.discoveryFailure = null; this.validListResponses = 0; this.listRequests.clear(); this.lastFingerprint = null;
     }
   }

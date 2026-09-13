@@ -28,7 +28,7 @@ function item(index, changes = {}) {
     title: `Fixture ${index}`,
     url: `https://chatgpt.com/c/fixture-${index}`,
     currentProject: null,
-    status: "pending",
+    status: "proposed",
     ...changes,
   };
 }
@@ -46,7 +46,13 @@ function plan(items, projects = []) {
 }
 
 function state(phase = "PILOT", changes = {}) {
-  return { runId: "run-fixture", accountFingerprint: "account-fixture", phase, ...changes };
+  return {
+    runId: "run-fixture",
+    accountFingerprint: "account-fixture",
+    workspaceFingerprint: "workspace-fixture",
+    phase,
+    ...changes,
+  };
 }
 
 function progress(approvedPlan, entries = {}) {
@@ -223,6 +229,13 @@ test("changed approval, changed plan, account mismatch, and invalid actions perf
   }
 });
 
+test("apply compares persisted workspace to live adapter context before writes", async () => {
+  const approvedPlan = plan([item(0)]);
+  const adapter = new FakeChatGPTAdapter({ workspaceFingerprint: "different-workspace" });
+  await assert.rejects(apply({ plan: approvedPlan, adapter }), /workspace/i);
+  assert.deepEqual(adapter.actions, []);
+});
+
 test("disabled action flags fail before adapter methods are called", async () => {
   const cases = [
     [plan([item(0)]), { ...enabled, actions: { ...enabled.actions, allowMove: false } }],
@@ -256,20 +269,34 @@ test("post-action verification must be verified", async () => {
   assert.deepEqual(adapter.verifications, [["fixture-0", "Work"]]);
 });
 
-test("resume skips persisted done, keep, and plan-done items", async () => {
+test("resume skips only persisted done and keep items", async () => {
   const adapter = new FakeChatGPTAdapter();
   const approvedPlan = plan([
     item(0),
     item(1, { action: "keep", suggestedAction: "keep", project: null, status: "unresolved" }),
-    item(2, { status: "done" }),
-    item(3),
+    item(2),
   ]);
   const firstKey = JSON.stringify(["conversation", "move", "fixture-0", "Work"]);
   const runState = state("APPLY", { applyProgress: progress(approvedPlan, { [firstKey]: { status: "done" } }) });
   const result = await apply({ plan: approvedPlan, adapter, state: runState, mode: "resume" });
   assert.equal(result.completed, 1);
-  assert.equal(result.skipped, 3);
-  assert.deepEqual(adapter.actions, [["move", "fixture-3", "Work"]]);
+  assert.equal(result.skipped, 2);
+  assert.deepEqual(adapter.actions, [["move", "fixture-2", "Work"]]);
+});
+
+test("apply rejects execution lifecycle statuses in the immutable plan before adapter use", async () => {
+  for (const status of ["pending", "running", "done", "failed", "skipped", "uncertain"]) {
+    const approvedPlan = plan([item(0, { status })]);
+    const adapter = new FakeChatGPTAdapter();
+    let fingerprintReads = 0;
+    adapter.getAccountFingerprint = async () => { fingerprintReads++; return "account-fixture"; };
+    await assert.rejects(apply({ plan: approvedPlan, adapter }), /approved plan|status|proposed/i);
+    assert.equal(fingerprintReads, 0, status);
+    assert.deepEqual(adapter.actions, [], status);
+  }
+
+  const keep = plan([item(0, { action: "keep", suggestedAction: "keep", project: null, status: "proposed" })]);
+  assert.equal((await apply({ plan: keep })).skipped, 1);
 });
 
 test("resume stops instead of repeating a previously running or uncertain action", async () => {
@@ -369,6 +396,11 @@ function writeCommandFixture(t, { approvedPlan = plan([item(0)]), runState = sta
   const paths = temporaryPaths(t);
   fs.mkdirSync(paths.plans, { recursive: true, mode: 0o700 });
   fs.writeFileSync(path.join(paths.plans, "migration-plan.json"), `${JSON.stringify(approvedPlan)}\n`, { mode: 0o600 });
+  fs.mkdirSync(paths.state, { recursive: true, mode: 0o700 });
+  fs.writeFileSync(path.join(paths.state, "account.json"), `${JSON.stringify({
+    accountFingerprint: runState.accountFingerprint,
+    workspaceFingerprint: runState.workspaceFingerprint,
+  })}\n`, { mode: 0o600 });
   saveRunState(paths, runState);
   return { paths, approvedPlan, config };
 }
@@ -476,6 +508,28 @@ test("account mismatch leaves command state at PLAN_REVIEW with zero actions", a
   assert.equal(loadRunState(fixture.paths).phase, "PLAN_REVIEW");
   assert.equal(adapter.actions.length, 0);
   assert.equal(adapter.closed, true);
+});
+
+test("apply command rejects missing or mismatched persisted workspace before adapter construction", async (t) => {
+  for (const scenario of ["missing-state", "missing-account", "mismatch"]) {
+    const fixture = writeCommandFixture(t);
+    const runState = loadRunState(fixture.paths);
+    const accountPath = path.join(fixture.paths.state, "account.json");
+    const account = JSON.parse(fs.readFileSync(accountPath, "utf8"));
+    if (scenario === "missing-state") delete runState.workspaceFingerprint;
+    if (scenario === "missing-account") delete account.workspaceFingerprint;
+    if (scenario === "mismatch") account.workspaceFingerprint = "different-workspace";
+    saveRunState(fixture.paths, runState);
+    fs.writeFileSync(accountPath, `${JSON.stringify(account)}\n`);
+    let constructions = 0;
+    await assert.rejects(runCommand(["--mode", "pilot", "--approve", fixture.approvedPlan.planHash], {
+      paths: fixture.paths,
+      rootDir: fixture.paths.root,
+      config: fixture.config,
+      createAdapter() { constructions++; return new FakeChatGPTAdapter(); },
+    }), /workspace|account context/i);
+    assert.equal(constructions, 0, scenario);
+  }
 });
 
 test("resume command requires verified pilot and records full approval", async (t) => {

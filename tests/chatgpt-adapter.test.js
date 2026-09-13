@@ -15,6 +15,7 @@ const { main: readWrapper } = require("../scripts/04-read");
 const fixtures = require("./fixtures/conversations.json");
 
 function setup(t, { loggedIn = true, status = 200, accountId = "fixture-account", emitSession = true, emitList = true,
+  workspaceMarkers = ["Synthetic workspace"],
   listJson = async () => ({ items: [...fixtures, { ...fixtures[0], title: "Synthetic latest", update_time: 1700000400 }] }) } = {}) {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "organizer-adapter-"));
   t.after(() => fs.rmSync(root, { recursive: true, force: true }));
@@ -33,6 +34,9 @@ function setup(t, { loggedIn = true, status = 200, accountId = "fixture-account"
     { name: "Work  Notes", url: "https://chatgpt.com/g/g-p-fixture-work/project" },
   ] };
   const visibleNode = { getClientRects: () => [1] };
+  const workspaceNodes = () => workspaceMarkers.map((value) => ({
+    ...visibleNode, innerText: value, textContent: value, visibility: "visible",
+  }));
   const projectRegion = {
     ...visibleNode,
     getAttribute: (name) => name === "aria-expanded" ? projectUI.expanded : name === "aria-busy" ? String(projectUI.busy) : null,
@@ -51,6 +55,7 @@ function setup(t, { loggedIn = true, status = 200, accountId = "fixture-account"
       if (selector === "button" && !loggedIn) return [{ getClientRects: () => [1], getAttribute: () => null, textContent: "Log in" }];
       if (selector === selectors.messageRoles) return messages;
       if (selector === selectors.projectsRegion) return Array(projectUI.regions).fill(projectRegion);
+      if (selector === selectors.workspaceContext) return workspaceNodes();
       return [];
     },
   };
@@ -89,8 +94,11 @@ test("fingerprint persists only a stable 16-hex digest and rejects account chang
   const fingerprint = await adapter.getAccountFingerprint();
   assert.match(fingerprint, /^[a-f0-9]{16}$/);
   const saved = fs.readFileSync(path.join(paths.state, "account.json"), "utf8");
-  assert.deepEqual(JSON.parse(saved), { accountFingerprint: fingerprint });
-  assert.doesNotMatch(saved, /fixture-account|fixture@example|synthetic-token/);
+  assert.deepEqual(JSON.parse(saved), {
+    accountFingerprint: fingerprint,
+    workspaceFingerprint: require("node:crypto").createHash("sha256").update("Synthetic workspace").digest("hex"),
+  });
+  assert.doesNotMatch(saved, /fixture-account|fixture@example|synthetic-token|Synthetic workspace/);
   page.emit("response", { url: () => "https://chatgpt.com/api/auth/session", status: () => 200,
     json: async () => ({ user: { id: "fixture-other-account" } }) });
   await assert.rejects(adapter.getAccountFingerprint(), /account mismatch/i);
@@ -103,7 +111,11 @@ test("read uses full ID, persists content and resumes without navigating", async
   assert.equal(record.conversationId, "fixture-chat-2-full-id");
   assert.deepEqual(record.messages, [{ role: "user", text: "Synthetic message" }]);
   assert.deepEqual(JSON.parse(fs.readFileSync(path.join(paths.raw, "conversations", "fixture-chat-2-full-id.json"))), record);
-  page.evaluate = async () => { throw new Error("Resume must not navigate"); };
+  const evaluate = page.evaluate;
+  page.evaluate = async (fn, arg) => {
+    if (typeof arg === "string") throw new Error("Resume must not navigate");
+    return evaluate(fn, arg);
+  };
   assert.deepEqual(await adapter.readConversation("fixture-chat-2-full-id"), record);
   await assert.rejects(adapter.readConversation("../outside"), /conversation ID/i);
 });
@@ -361,7 +373,15 @@ test("Project listing rejects duplicate normalized names pointing to different n
 
 test("Project listing rejects DOM changes between its bounded observations", async (t) => {
   const { adapter, projectUI, page } = setup(t);
-  page.waitForTimeout = async () => { projectUI.entries[0].name = "Changed synthetic name"; };
+  const evaluate = page.evaluate;
+  let projectObservations = 0;
+  page.evaluate = async (fn, arg) => {
+    const result = await evaluate(fn, arg);
+    if (arg?.selectors && arg?.noProjects && ++projectObservations === 1) {
+      projectUI.entries[0].name = "Changed synthetic name";
+    }
+    return result;
+  };
   await assert.rejects(adapter.listProjects(), /project.*changed|unstable/i);
 });
 
@@ -401,7 +421,19 @@ test("successful discover persists a new verified run state and advances only th
   const state = loadRunState(paths);
   assert.match(state.runId, /^[0-9a-f-]{36}$/i);
   assert.match(state.accountFingerprint, /^[a-f0-9]{16}$/);
+  assert.match(state.workspaceFingerprint, /^[a-f0-9]{64}$/);
+  assert.equal(state.workspaceFingerprint, JSON.parse(fs.readFileSync(path.join(paths.state, "account.json"))).workspaceFingerprint);
   assert.equal(state.phase, "DISCOVER");
+});
+
+test("discovery rejects missing or ambiguous workspace context before persisting a run", async (t) => {
+  for (const workspaceMarkers of [[], ["Synthetic workspace", "Other synthetic workspace"]]) {
+    const { adapter, paths } = setup(t, { workspaceMarkers });
+    const output = { write() {} };
+    assert.equal(await main(["discover", "--max", "1"], { adapter, paths, stdout: output, stderr: output }), 1);
+    assert.equal(loadRunState(paths), null);
+    assert.equal(fs.existsSync(path.join(paths.state, "account.json")), false);
+  }
 });
 
 test("successful discover resumes AUTHENTICATE without rewinding a later phase", async (t) => {
@@ -442,6 +474,8 @@ function writeSetup(t, changes = {}) {
     projects: [{ name: "Work", url: "https://chatgpt.com/g/g-p-work/project" }],
     currentProject: null,
     archived: false,
+    renderedConversation: true,
+    emitConversationResponse: true,
     controls: { create: 1, createSubmit: 1, header: 1, move: 1, archive: 1, destination: 1 },
     controlText: { create: "新项目", createSubmit: "创建项目", header: "打开对话选项", move: "移至项目", archive: "归档" },
     requiredSelectorFragment: { create: 'button[aria-label="新项目"]', createSubmit: '[role="dialog"] button' },
@@ -460,14 +494,42 @@ function writeSetup(t, changes = {}) {
     if (typeof arg === "string" && arg.startsWith("https://chatgpt.com/c/")) {
       state.url = arg;
       state.safety.url = arg;
+      if (state.emitConversationResponse) {
+        const id = arg.slice("https://chatgpt.com/c/".length);
+        const request = { url: () => `https://chatgpt.com/backend-api/conversation/${id}` };
+        page.emit("request", request);
+        page.emit("response", {
+          url: () => `https://chatgpt.com/backend-api/conversation/${id}`,
+          status: () => 200,
+          request: () => request,
+          json: async () => ({ id }),
+        });
+      }
+      if (state.emitStaleConversationResponse) {
+        const id = arg.slice("https://chatgpt.com/c/".length);
+        page.emit("response", {
+          url: () => `https://chatgpt.com/backend-api/conversation/${id}`,
+          status: () => 200,
+          request: () => ({ url: () => `https://chatgpt.com/backend-api/conversation/${id}` }),
+        });
+      }
       return;
     }
     if (arg?.command === "safety") return { ...state.safety, url: state.url };
+    if (arg?.command === "workspaceContext") return { url: state.url, markers: state.safety.workspaceMarkers };
+    if (arg?.command === "targetConversation") {
+      const rendered = Array.isArray(state.targetObservations)
+        ? state.targetObservations.shift()
+        : state.renderedConversation;
+      return { url: state.url, rendered: Boolean(rendered), markerCount: rendered ? 1 : 0 };
+    }
     if (arg?.command === "conversationState") {
+      const broadProject = arg.selectors.conversationProject.includes("main a[") ? state.broadProject : null;
+      const broadArchived = arg.selectors.archivedState.includes('[role="status"]') ? state.genericArchivedStatus : false;
       return {
         url: state.url,
-        projectNames: state.currentProject ? [state.currentProject] : [],
-        archived: state.archived,
+        projectNames: state.currentProject ? [state.currentProject] : broadProject ? [broadProject] : [],
+        archived: state.archived || Boolean(broadArchived),
       };
     }
     if (arg?.command === "setProjectName") {
@@ -585,6 +647,46 @@ test("move and archive return verified only after observable final-state confirm
 
   const archiveUncertain = writeSetup(t, { confirmArchive: false });
   assert.equal((await archiveUncertain.adapter.archiveConversation("fixture-chat")).status, "uncertain");
+});
+
+test("conversation writes require fresh target response and two stable rendered observations", async (t) => {
+  const stale = writeSetup(t, { currentProject: "Work", emitConversationResponse: false });
+  assert.equal((await stale.adapter.moveConversation("fixture-chat", "Work")).status, "uncertain");
+  assert.deepEqual(stale.state.clicks, []);
+
+  const delayedPriorRequest = writeSetup(t, { currentProject: "Work", emitConversationResponse: false, emitStaleConversationResponse: true });
+  assert.equal((await delayedPriorRequest.adapter.moveConversation("fixture-chat", "Work")).status, "uncertain");
+  assert.deepEqual(delayedPriorRequest.state.clicks, []);
+
+  const missingMarker = writeSetup(t, { renderedConversation: false });
+  assert.equal((await missingMarker.adapter.archiveConversation("fixture-chat")).status, "uncertain");
+  assert.deepEqual(missingMarker.state.clicks, []);
+
+  const unstable = writeSetup(t, { targetObservations: [true, false] });
+  assert.equal((await unstable.adapter.moveConversation("fixture-chat", "Work")).status, "uncertain");
+  assert.deepEqual(unstable.state.clicks, []);
+});
+
+test("message Project links and generic status text cannot verify ownership or archive state", async (t) => {
+  const broadProject = writeSetup(t, { broadProject: "Work", confirmMove: false });
+  assert.equal((await broadProject.adapter.moveConversation("fixture-chat", "Work")).status, "uncertain");
+
+  const broadArchive = writeSetup(t, { genericArchivedStatus: true, confirmArchive: false });
+  assert.equal((await broadArchive.adapter.archiveConversation("fixture-chat")).status, "uncertain");
+});
+
+test("write safety rejects changed, missing, or multiple live workspace markers", async (t) => {
+  for (const markers of [[], ["One", "Two"]]) {
+    const fixture = writeSetup(t, { safety: { url: "https://chatgpt.com/", text: "", workspaceMarkers: markers } });
+    assert.equal((await fixture.adapter.createProject("Research")).status, "uncertain");
+    assert.deepEqual(fixture.state.clicks, []);
+  }
+
+  const changed = writeSetup(t);
+  await changed.adapter.getAccountFingerprint();
+  changed.state.safety.workspaceMarkers = ["Changed synthetic workspace"];
+  assert.equal((await changed.adapter.createProject("Research")).status, "access_restricted");
+  assert.deepEqual(changed.state.clicks, []);
 });
 
 test("write adapter rejects invalid identifiers and destructive matched controls", async (t) => {

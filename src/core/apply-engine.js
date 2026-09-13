@@ -29,7 +29,6 @@ function actionsFor(plan) {
     action: item.action,
     conversationId: item.conversationId,
     projectName: item.project,
-    planStatus: item.status,
   }));
   return [
     ...projects,
@@ -45,6 +44,19 @@ function validateState(state, phases) {
     || !phases.includes(state.phase)) {
     throw new Error(`Invalid run state or phase; expected ${phases.join(" or ")}`);
   }
+  if (typeof state.workspaceFingerprint !== "string" || !state.workspaceFingerprint) {
+    throw new Error("Invalid run state workspace fingerprint");
+  }
+}
+
+function validateApprovedPlanSemantics(plan) {
+  for (const item of plan.items) {
+    const allowed = item.action === "keep"
+      ? item.status === "proposed" || item.status === "unresolved"
+      : item.status === "proposed";
+    if (!allowed) throw new Error(`Invalid approved plan status for ${item.action} item; execution progress belongs in run state`);
+  }
+  return plan;
 }
 
 function inspectProgress(state, planHash, scheduledActions) {
@@ -92,6 +104,7 @@ function validateFlags(plan, config) {
 function validateApplyRequest({ plan, state, approvalHash, config, mode, phases }) {
   if (!approvalPattern.test(approvalHash || "")) throw new Error("Approval hash must be 64 lowercase hexadecimal characters");
   validateMigrationPlan(plan);
+  validateApprovedPlanSemantics(plan);
   const calculated = hashPlan(plan);
   if (plan.planHash !== calculated || approvalHash !== calculated) throw new Error("Approval hash does not match the immutable plan");
   if (!["pilot", "resume"].includes(mode)) throw new Error("Apply mode must be pilot or resume");
@@ -167,7 +180,7 @@ async function runApply({ plan, state, adapter, approvalHash, config, mode, maxA
     result.stoppedReason = "uncertain";
     return result;
   }
-  const actualFingerprint = await adapter.getAccountFingerprint();
+  const actualFingerprint = await adapter.getAccountFingerprint({ workspaceFingerprint: state.workspaceFingerprint });
   if (actualFingerprint !== state.accountFingerprint) throw new Error("Account fingerprint mismatch; zero actions performed");
 
   const persist = stateSaver(paths, saveState);
@@ -181,7 +194,7 @@ async function runApply({ plan, state, adapter, approvalHash, config, mode, maxA
   for (const action of validation.scheduledActions) {
     const key = actionKey(action);
     const progress = entries[key];
-    if (action.action === "keep" || action.planStatus === "done" || progress?.status === "done" || progress?.status === "skipped") {
+    if (action.action === "keep" || progress?.status === "done" || progress?.status === "skipped") {
       result.skipped++;
       if (!progress && action.action === "keep") entries[key] = { status: "skipped" };
       continue;
@@ -222,4 +235,4 @@ async function runApply({ plan, state, adapter, approvalHash, config, mode, maxA
   return result;
 }
 
-module.exports = { DEFAULT_RESUME_MAX_ACTIONS, runApply, validateApplyRequest, actionKey };
+module.exports = { DEFAULT_RESUME_MAX_ACTIONS, runApply, validateApplyRequest, validateApprovedPlanSemantics, actionKey };

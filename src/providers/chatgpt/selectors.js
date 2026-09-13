@@ -11,8 +11,9 @@ const selectors = {
   projectDialogSubmit: '[role="dialog"] button[type="submit"], [role="dialog"] button[data-testid="create-project-submit"], [role="dialog"] button',
   openMenuItems: '[data-radix-menu-content] [role="menuitem"], [role="menu"][data-state="open"] [role="menuitem"], [role="menu"] [role="menuitem"]',
   projectChoices: '[data-radix-menu-content] [role="menuitem"], [role="dialog"] [role="option"], [role="dialog"] [role="menuitem"], [role="listbox"] [role="option"]',
-  conversationProject: 'main [data-testid="conversation-project-name"], main a[href*="/g/g-p-"][href$="/project"], header a[href*="/g/g-p-"][href$="/project"]',
-  archivedState: 'main [data-testid="archived-conversation-indicator"], main [role="status"], header [role="status"]',
+  renderedConversation: 'main [data-message-author-role]',
+  conversationProject: 'header [data-testid="conversation-project-name"], [data-testid="conversation-project-breadcrumb"] [aria-current="page"], [data-testid="conversation-project-ownership"]',
+  archivedState: 'main [data-testid="archived-conversation-indicator"], header [data-testid="archived-conversation-indicator"]',
   safetyText: '[role="alert"], [role="status"], main h1, main h2, [data-testid*="challenge"]',
   workspaceContext: '[data-testid="workspace-switcher"] [aria-current="true"], [data-testid="workspace-name"]',
   // Conservative Project DOM candidates; authenticated live verification is still required.

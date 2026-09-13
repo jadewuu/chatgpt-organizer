@@ -16,8 +16,23 @@ const transitions = {
   COMPLETE: [],
 };
 
-function createRunState(runId, accountFingerprint) {
-  return { runId, accountFingerprint, phase: "PREFLIGHT" };
+function createRunState(runId, accountFingerprint, workspaceFingerprint) {
+  return { runId, accountFingerprint, ...(workspaceFingerprint ? { workspaceFingerprint } : {}), phase: "PREFLIGHT" };
+}
+
+function validatePersistedAccountContext(paths, state) {
+  let account;
+  try { account = JSON.parse(fs.readFileSync(path.join(paths.state, "account.json"), "utf8")); }
+  catch (error) { throw new Error(`Unable to validate persisted account context: ${error.message}`); }
+  const keys = account && typeof account === "object" && !Array.isArray(account) ? Object.keys(account).sort() : [];
+  if (keys.join(",") !== "accountFingerprint,workspaceFingerprint"
+    || typeof state?.accountFingerprint !== "string" || !state.accountFingerprint
+    || typeof state?.workspaceFingerprint !== "string" || !state.workspaceFingerprint
+    || account.accountFingerprint !== state.accountFingerprint
+    || account.workspaceFingerprint !== state.workspaceFingerprint) {
+    throw new Error("Persisted account and workspace context does not match the run state");
+  }
+  return account;
 }
 
 function transitionState(state, next) {
@@ -58,4 +73,5 @@ module.exports = {
   loadRunState,
   saveRunState,
   transitionState,
+  validatePersistedAccountContext,
 };

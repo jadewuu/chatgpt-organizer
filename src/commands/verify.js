@@ -1,10 +1,10 @@
 const fs = require("node:fs");
 const path = require("node:path");
 const { appendAudit } = require("../core/audit");
-const { actionKey } = require("../core/apply-engine");
+const { actionKey, validateApprovedPlanSemantics } = require("../core/apply-engine");
 const { createPaths } = require("../core/paths");
 const { hashPlan } = require("../core/planner");
-const { loadRunState, saveRunState, transitionState } = require("../core/state");
+const { loadRunState, saveRunState, transitionState, validatePersistedAccountContext } = require("../core/state");
 const { validateMigrationPlan } = require("../core/validate");
 
 const progressStatuses = new Set(["running", "done", "skipped", "uncertain"]);
@@ -39,11 +39,13 @@ function scheduledActions(plan) {
 function validateStatic(paths) {
   const plan = readJson(path.join(paths.plans, "migration-plan.json"), "migration plan");
   validateMigrationPlan(plan);
+  validateApprovedPlanSemantics(plan);
   const calculated = hashPlan(plan);
   if (plan.planHash !== calculated) throw new Error("Migration plan hash does not match its immutable contents");
   const state = loadRunState(paths);
   if (!isPlainObject(state) || typeof state.runId !== "string" || !state.runId
     || typeof state.accountFingerprint !== "string" || !state.accountFingerprint
+    || typeof state.workspaceFingerprint !== "string" || !state.workspaceFingerprint
     || !["PILOT", "APPLY", "VERIFY"].includes(state.phase)) {
     throw new Error("Invalid run state or verification phase");
   }
@@ -55,11 +57,7 @@ function validateStatic(paths) {
       throw new Error("Verified pilot for this plan is required");
     }
   }
-  const account = readJson(path.join(paths.state, "account.json"), "account context");
-  if (!isPlainObject(account) || Object.keys(account).length !== 1
-    || account.accountFingerprint !== state.accountFingerprint) {
-    throw new Error("Persisted account fingerprint does not match the run state");
-  }
+  validatePersistedAccountContext(paths, state);
   const progress = state.applyProgress;
   if (!isPlainObject(progress) || Object.keys(progress).some((key) => !["planHash", "entries"].includes(key))
     || progress.planHash !== calculated || !isPlainObject(progress.entries)) {
@@ -124,7 +122,7 @@ async function run(argv = [], deps = {}) {
       const { ChatGPTAdapter } = require("../providers/chatgpt/adapter");
       adapter = new ChatGPTAdapter({ paths, chromeExecutable: deps.chromeExecutable });
     }
-    const actualFingerprint = await adapter.getAccountFingerprint();
+    const actualFingerprint = await adapter.getAccountFingerprint({ workspaceFingerprint: validated.state.workspaceFingerprint });
     if (actualFingerprint !== validated.state.accountFingerprint) throw new Error("Account fingerprint mismatch; verification stopped");
 
     const done = validated.actions.filter((action) => validated.state.applyProgress.entries[actionKey(action)]?.status === "done");

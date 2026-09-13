@@ -1,6 +1,7 @@
 class FakeChatGPTAdapter {
-  constructor({ accountFingerprint = "account-fixture", results = {}, verificationResults = {} } = {}) {
+  constructor({ accountFingerprint = "account-fixture", workspaceFingerprint = "workspace-fixture", results = {}, verificationResults = {} } = {}) {
     this.accountFingerprint = accountFingerprint;
+    this.workspaceFingerprint = workspaceFingerprint;
     this.results = results;
     this.verificationResults = verificationResults;
     this.actions = [];
@@ -8,7 +9,10 @@ class FakeChatGPTAdapter {
     this.closed = false;
   }
 
-  async getAccountFingerprint() { return this.accountFingerprint; }
+  async getAccountFingerprint({ workspaceFingerprint } = {}) {
+    if (workspaceFingerprint && workspaceFingerprint !== this.workspaceFingerprint) throw new Error("Workspace fingerprint mismatch");
+    return this.accountFingerprint;
+  }
 
   resultFor(key) {
     const value = this.results[key];
