@@ -87,7 +87,7 @@ function parseArguments(argv) {
   throw new Error("plan accepts only --allow-full-content");
 }
 
-function readClassificationInput(inputPath, conversations) {
+function readClassificationInput(inputPath, conversations, { requireFirstPass = false } = {}) {
   if (!fs.existsSync(inputPath)) throw new Error("Missing first-pass classification-input.jsonl");
   let text;
   try { text = fs.readFileSync(inputPath, "utf8"); }
@@ -115,6 +115,7 @@ function readClassificationInput(inputPath, conversations) {
     }
     if (seen.has(row.conversationId)) throw new Error(`Duplicate classification input ID: ${row.conversationId}`);
     if (!inventoryIds.has(row.conversationId)) throw new Error(`Unknown classification input ID: ${row.conversationId}`);
+    if (requireFirstPass && Object.hasOwn(row, "excerpts")) throw new Error("classification-input.jsonl is not a first-pass artifact");
     seen.add(row.conversationId);
     return row;
   });
@@ -184,7 +185,7 @@ async function run(argv = [], deps = {}) {
     return 0;
   }
 
-  if (!["CLASSIFY", "PLAN_REVIEW"].includes(state.phase)) {
+  if (state.phase !== "CLASSIFY") {
     throw new Error(`Cannot build migration plan from phase ${state.phase}`);
   }
 
@@ -192,10 +193,9 @@ async function run(argv = [], deps = {}) {
   if (classifications === null) throw new Error("Missing schema-valid classifications.json");
   validateClassifications(classifications);
   requireClassificationSet(classifications, conversations);
-  readClassificationInput(inputPath, conversations);
+  readClassificationInput(inputPath, conversations, { requireFirstPass: allowFullContent });
 
   if (allowFullContent) {
-    if (state.phase !== "CLASSIFY") throw new Error("Full-content review requires CLASSIFY phase");
     const input = buildClassificationInput(conversations, extracted, effectiveConfig, {
       allowFullContent: true,
       priorClassifications: classifications,
@@ -209,10 +209,8 @@ async function run(argv = [], deps = {}) {
 
   const plan = buildMigrationPlan(conversations, classifications, effectiveConfig, existingProjects, { now: deps.now });
   writePrivate(paths, planPath, `${JSON.stringify(plan, null, 2)}\n`);
-  if (state.phase === "CLASSIFY") {
-    transitionState(state, "PLAN_REVIEW");
-    saveRunState(paths, state);
-  }
+  transitionState(state, "PLAN_REVIEW");
+  saveRunState(paths, state);
   const phase = state.phase;
   const message = `Wrote .local/plans/migration-plan.json; phase is ${phase}. Review the plan before any approval.`;
   (deps.stdout || process.stdout).write(`${message}\n`);

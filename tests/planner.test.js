@@ -176,6 +176,28 @@ test("plan command uses persisted phases for taxonomy, classification, and revie
   assert.equal(fs.existsSync(path.join(paths.plans, "migration-plan.json.tmp")), false);
 });
 
+test("plan refuses to rebuild a migration plan after entering PLAN_REVIEW", async (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "chatgpt-organizer-plan-review-"));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const paths = createPaths(root);
+  fs.mkdirSync(paths.raw, { recursive: true, mode: 0o700 });
+  fs.writeFileSync(path.join(paths.raw, "conversations.json"), `${JSON.stringify(conversations)}\n`);
+  fs.mkdirSync(paths.plans, { recursive: true, mode: 0o700 });
+  fs.writeFileSync(path.join(paths.plans, "taxonomy.yaml"), YAML.stringify(config.taxonomy));
+  fs.writeFileSync(path.join(paths.plans, "classification-input.jsonl"), `${buildClassificationInput(conversations, extracted, config).map((row) => JSON.stringify(row)).join("\n")}\n`);
+  fs.writeFileSync(path.join(paths.plans, "classifications.json"), JSON.stringify([{
+    conversationId: "fixture-chat-1", project: "Work", confidence: 0.99, reason: "r", suggestedAction: "move",
+  }]));
+  fs.writeFileSync(path.join(paths.plans, "migration-plan.json"), "existing plan\n");
+  const state = createRunState("run", "account");
+  state.phase = "PLAN_REVIEW";
+  saveRunState(paths, state);
+
+  await assert.rejects(run([], { rootDir: root, paths, config }), /CLASSIFY|PLAN_REVIEW/i);
+  assert.equal(fs.readFileSync(path.join(paths.plans, "migration-plan.json"), "utf8"), "existing plan\n");
+  assert.equal(loadRunState(paths).phase, "PLAN_REVIEW");
+});
+
 test("public full-content pass requires CLASSIFY and revises input without a plan or phase change", async (t) => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "chatgpt-organizer-plan-second-pass-"));
   t.after(() => fs.rmSync(root, { recursive: true, force: true }));
@@ -203,6 +225,8 @@ test("public full-content pass requires CLASSIFY and revises input without a pla
   assert.equal(fs.existsSync(path.join(paths.plans, "migration-plan.json")), false);
   const revised = JSON.parse(fs.readFileSync(path.join(paths.plans, "classification-input.jsonl"), "utf8").trim());
   assert.deepEqual(revised.excerpts, [{ role: "assistant", text: "answ" }]);
+  await assert.rejects(run(["--allow-full-content"], { rootDir: root, paths, config, stdout: output }), /first-pass|classification-input/i);
+  assert.deepEqual(JSON.parse(fs.readFileSync(path.join(paths.plans, "classification-input.jsonl"), "utf8").trim()), revised);
 });
 
 test("plan rejects invalid public arguments and stale or missing classification input", async (t) => {

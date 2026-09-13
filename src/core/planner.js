@@ -53,10 +53,16 @@ function userMessages(record) {
 }
 
 function assertChatGPTConversation(conversation) {
+  const conversationId = conversation?.conversationId;
+  const expectedUrl = `https://chatgpt.com/c/${conversationId}`;
+  let url;
+  try { url = new URL(conversation?.url); } catch { url = null; }
   if (!conversation || conversation.provider !== "chatgpt"
-    || typeof conversation.conversationId !== "string"
-    || !/^[A-Za-z0-9_-]+$/.test(conversation.conversationId)
-    || conversation.url !== `https://chatgpt.com/c/${conversation.conversationId}`) {
+    || typeof conversationId !== "string"
+    || !/^[A-Za-z0-9_-]+$/.test(conversationId)
+    || !url || url.protocol !== "https:" || url.hostname !== "chatgpt.com"
+    || url.pathname !== `/c/${conversationId}` || url.search || url.hash
+    || conversation.url !== expectedUrl) {
     throw new Error("Invalid ChatGPT conversation provider, ID, or URL");
   }
   return conversation;
