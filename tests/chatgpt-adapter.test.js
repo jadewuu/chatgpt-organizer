@@ -430,3 +430,169 @@ test("discover preserves the exact prior Projects inventory when an expanded reg
   assert.equal(fs.readFileSync(target, "utf8"), prior);
   assert.equal(fs.existsSync(`${target}.tmp`), false);
 });
+
+function writeSetup(t, changes = {}) {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "organizer-write-adapter-"));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const paths = createPaths(root);
+  const page = new EventEmitter();
+  const state = {
+    url: "https://chatgpt.com/",
+    safety: { url: "https://chatgpt.com/", text: "", workspaceMarkers: ["Personal"] },
+    projects: [{ name: "Work", url: "https://chatgpt.com/g/g-p-work/project" }],
+    currentProject: null,
+    archived: false,
+    controls: { create: 1, createSubmit: 1, header: 1, move: 1, archive: 1, destination: 1 },
+    controlText: { create: "新项目", createSubmit: "创建项目", header: "打开对话选项", move: "移至项目", archive: "归档" },
+    requiredSelectorFragment: { create: 'button[aria-label="新项目"]', createSubmit: '[role="dialog"] button' },
+    clicks: [],
+    submittedProject: null,
+    confirmCreate: true,
+    confirmMove: true,
+    confirmArchive: true,
+    ...changes,
+  };
+  page.url = () => state.url;
+  page.waitForTimeout = async () => {};
+  page.on = page.on.bind(page);
+  page.off = page.off.bind(page);
+  page.evaluate = async (_fn, arg) => {
+    if (typeof arg === "string" && arg.startsWith("https://chatgpt.com/c/")) {
+      state.url = arg;
+      state.safety.url = arg;
+      return;
+    }
+    if (arg?.command === "safety") return { ...state.safety, url: state.url };
+    if (arg?.command === "conversationState") {
+      return {
+        url: state.url,
+        projectNames: state.currentProject ? [state.currentProject] : [],
+        archived: state.archived,
+      };
+    }
+    if (arg?.command === "setProjectName") {
+      state.submittedProject = arg.value;
+      return { count: 1 };
+    }
+    if (arg?.command === "click") {
+      if (state.requiredSelectorFragment[arg.control]
+        && !arg.selector.includes(state.requiredSelectorFragment[arg.control])) {
+        return { count: 0, destructive: false };
+      }
+      const count = arg.exactText === undefined
+        ? (new RegExp(arg.pattern, "i").test(state.controlText[arg.control]) ? state.controls[arg.control] : 0)
+        : state.controls.destination;
+      if (count !== 1) return { count, destructive: false };
+      if (state.destructiveMatch === true && arg.control === "archive") return { count, destructive: true };
+      state.clicks.push(arg.exactText === undefined ? arg.control : `destination:${arg.exactText}`);
+      if (state.stopAfterClick === arg.control) state.safety.text = "Verify you are human";
+      if (arg.control === "createSubmit" && state.confirmCreate) {
+        state.projects.push({ name: state.submittedProject, url: "https://chatgpt.com/g/g-p-created/project" });
+      }
+      if (arg.control === "destination" && state.confirmMove) state.currentProject = arg.exactText;
+      if (arg.control === "archive" && state.confirmArchive) state.archived = true;
+      return { count: 1, destructive: false };
+    }
+    if (arg?.selectors && arg?.noProjects && arg?.moreProjects) {
+      return {
+        url: state.url,
+        uncertain: false,
+        emptyState: state.projects.length === 0,
+        entries: state.projects,
+      };
+    }
+    if (arg?.selectors && arg?.login) return { loggedIn: true, loginRequired: false, restricted: false };
+    throw new Error(`Unexpected fake-page evaluation: ${JSON.stringify(arg)}`);
+  };
+  const browser = {
+    launch: async () => page,
+    goto: async () => page.emit("response", {
+      url: () => "https://chatgpt.com/api/auth/session",
+      status: () => 200,
+      json: async () => ({ user: { id: "fixture-write-account" } }),
+    }),
+    close: async () => {},
+  };
+  const adapter = new ChatGPTAdapter({ paths, browser });
+  t.after(() => adapter.close());
+  return { adapter, state };
+}
+
+test("write adapter requires exact, unique Project and menu matches", async (t) => {
+  const duplicate = writeSetup(t, { controls: { create: 1, createSubmit: 1, header: 1, move: 1, archive: 1, destination: 2 } });
+  assert.equal((await duplicate.adapter.moveConversation("fixture-chat", "Work")).status, "selector_missing");
+  assert.deepEqual(duplicate.state.clicks, ["header", "move"]);
+
+  const missing = writeSetup(t, { controls: { create: 1, createSubmit: 1, header: 1, move: 0, archive: 1, destination: 1 } });
+  assert.equal((await missing.adapter.moveConversation("fixture-chat", "Work")).status, "selector_missing");
+  assert.deepEqual(missing.state.clicks, ["header"]);
+});
+
+test("safety stops are typed and happen before any write click", async (t) => {
+  for (const [text, expected] of [
+    ["Too many requests", "rate_limited"],
+    ["Verify you are human", "access_restricted"],
+  ]) {
+    const { adapter, state } = writeSetup(t, { safety: { url: "https://chatgpt.com/", text, workspaceMarkers: ["Personal"] } });
+    assert.equal((await adapter.createProject("Research")).status, expected);
+    assert.deepEqual(state.clicks, []);
+  }
+
+  const loggedOut = writeSetup(t, { safety: {
+    url: "https://chatgpt.com/", text: "", workspaceMarkers: [], loginRequired: true,
+  } });
+  assert.equal((await loggedOut.adapter.createProject("Research")).status, "access_restricted");
+  assert.deepEqual(loggedOut.state.clicks, []);
+
+  const postClick = writeSetup(t, { projects: [], stopAfterClick: "create" });
+  assert.equal((await postClick.adapter.createProject("Research")).status, "access_restricted");
+  assert.deepEqual(postClick.state.clicks, ["create"]);
+});
+
+test("Project creation is exact, idempotent, and verified from the sidebar", async (t) => {
+  const existing = writeSetup(t);
+  assert.deepEqual(await existing.adapter.createProject("Work"), { status: "verified", evidence: "Project already exists" });
+  assert.deepEqual(existing.state.clicks, []);
+
+  const created = writeSetup(t, { projects: [] });
+  assert.equal((await created.adapter.createProject("Research")).status, "verified");
+  assert.deepEqual(created.state.clicks, ["create", "createSubmit"]);
+  assert.equal(created.state.submittedProject, "Research");
+
+  const uncertain = writeSetup(t, { projects: [], confirmCreate: false });
+  assert.equal((await uncertain.adapter.createProject("Research")).status, "uncertain");
+});
+
+test("move and archive return verified only after observable final-state confirmation", async (t) => {
+  const moved = writeSetup(t);
+  assert.equal((await moved.adapter.moveConversation("fixture-chat", "Work")).status, "verified");
+  assert.equal((await moved.adapter.verifyConversationLocation("fixture-chat", "Work")).status, "verified");
+
+  const alreadyMoved = writeSetup(t, { currentProject: "Work" });
+  assert.equal((await alreadyMoved.adapter.moveConversation("fixture-chat", "Work")).status, "verified");
+  assert.deepEqual(alreadyMoved.state.clicks, []);
+
+  const moveUncertain = writeSetup(t, { confirmMove: false });
+  assert.equal((await moveUncertain.adapter.moveConversation("fixture-chat", "Work")).status, "uncertain");
+
+  const archived = writeSetup(t);
+  assert.equal((await archived.adapter.archiveConversation("fixture-chat")).status, "verified");
+  assert.equal((await archived.adapter.verifyConversationLocation("fixture-chat", "archived")).status, "verified");
+
+  const alreadyArchived = writeSetup(t, { archived: true });
+  assert.equal((await alreadyArchived.adapter.archiveConversation("fixture-chat")).status, "verified");
+  assert.deepEqual(alreadyArchived.state.clicks, []);
+
+  const archiveUncertain = writeSetup(t, { confirmArchive: false });
+  assert.equal((await archiveUncertain.adapter.archiveConversation("fixture-chat")).status, "uncertain");
+});
+
+test("write adapter rejects invalid identifiers and destructive matched controls", async (t) => {
+  const { adapter } = writeSetup(t);
+  await assert.rejects(adapter.moveConversation("../outside", "Work"), /conversation ID/i);
+  await assert.rejects(adapter.createProject("  "), /Project name/i);
+  const destructive = writeSetup(t, { destructiveMatch: true });
+  assert.equal((await destructive.adapter.archiveConversation("fixture-chat")).status, "selector_missing");
+  assert.deepEqual(destructive.state.clicks, ["header"]);
+  assert.equal(typeof adapter.removeConversation, "undefined");
+});

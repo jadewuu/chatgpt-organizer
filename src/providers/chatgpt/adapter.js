@@ -11,6 +11,36 @@ function isListUrl(value) {
   return url.origin === "https://chatgpt.com" && url.pathname === "/backend-api/conversations";
 }
 
+function writeResult(status, evidence) {
+  return { status, evidence };
+}
+
+function validateConversationId(id) {
+  if (typeof id !== "string" || !/^[A-Za-z0-9_-]+$/.test(id)) throw new Error("Invalid conversation ID");
+  return id;
+}
+
+function validateProjectName(name) {
+  if (typeof name !== "string" || !name.trim() || name !== name.normalize("NFC").trim() || /[\r\n\0]/.test(name)) {
+    throw new Error("Invalid Project name");
+  }
+  return name;
+}
+
+function mapWriteError(error) {
+  const message = String(error?.message || error);
+  if (/rate limit|too many requests|请求过多|请求过于频繁/i.test(message)) {
+    return writeResult("rate_limited", "Rate limit detected");
+  }
+  if (/login|access|account|workspace|restriction|verification|challenge/i.test(message)) {
+    return writeResult("access_restricted", "Account access is not safely verifiable");
+  }
+  if (/selector|missing|ambiguous|project region|unsupported project/i.test(message)) {
+    return writeResult("selector_missing", "Required control is missing or ambiguous");
+  }
+  return writeResult("uncertain", "Browser state could not be verified");
+}
+
 class ChatGPTAdapter {
   constructor({ paths = createPaths(), browser, chromeExecutable, headless = false } = {}) {
     this.paths = paths;
@@ -28,6 +58,8 @@ class ChatGPTAdapter {
     this.discoveryFailure = null;
     this.validListResponses = 0;
     this.listRequests = new Set();
+    this.writeFingerprint = null;
+    this.writeWorkspaceDigest = null;
   }
 
   async open() {
@@ -267,6 +299,248 @@ class ChatGPTAdapter {
     if (JSON.stringify(first) !== JSON.stringify(second)) throw new Error("Project inventory changed between observations; stopped");
     await this.checkResponses();
     return second;
+  }
+
+  async detectSafetyStop() {
+    try {
+      await this.open();
+      while (this.pending.size) await Promise.all([...this.pending]);
+      if (this.failure) return mapWriteError(this.failure);
+      if (this.authRequired) return writeResult("access_restricted", "Login is required");
+      const snapshot = await this.page.evaluate(({ command, selectors, login }) => {
+        const visible = (node) => node.getClientRects().length > 0
+          && !["hidden", "collapse"].includes(getComputedStyle(node).visibility)
+          && getComputedStyle(node).opacity !== "0";
+        const text = [...document.querySelectorAll(selectors.safetyText)]
+          .filter(visible).map((node) => node.innerText || node.textContent || "").join(" ");
+        const workspaceMarkers = [...document.querySelectorAll(selectors.workspaceContext)]
+          .filter(visible).map((node) => (node.innerText || node.textContent || "").normalize("NFC").trim()).filter(Boolean);
+        const loginPattern = new RegExp(login, "i");
+        const loginRequired = [...document.querySelectorAll("button, a")].filter(visible)
+          .some((node) => loginPattern.test(`${node.getAttribute("aria-label") || ""} ${node.innerText || node.textContent || ""}`));
+        return { command, url: location.href, text, workspaceMarkers, loginRequired };
+      }, { command: "safety", selectors, login: patterns.login.source });
+      let url;
+      try { url = new URL(snapshot?.url); } catch { return writeResult("uncertain", "Page URL is unavailable"); }
+      if (url.origin !== "https://chatgpt.com") return writeResult("access_restricted", "Unexpected page origin");
+      if (patterns.loggedOutPath.test(url.pathname) || patterns.challengePath.test(url.pathname)) {
+        return writeResult("access_restricted", "Login or verification page detected");
+      }
+      if (snapshot.loginRequired) return writeResult("access_restricted", "Login is required");
+      if (patterns.rateLimit.test(snapshot.text || "")) return writeResult("rate_limited", "Rate limit detected");
+      if (patterns.accessRestriction.test(snapshot.text || "")) return writeResult("access_restricted", "Access restriction detected");
+      const markers = [...new Set((snapshot.workspaceMarkers || []).map((value) => value.normalize("NFC").trim()).filter(Boolean))];
+      if (markers.length > 1) return writeResult("uncertain", "Workspace context is ambiguous");
+      if (markers.length === 1) {
+        const digest = createHash("sha256").update(markers[0]).digest("hex");
+        if (this.writeWorkspaceDigest && this.writeWorkspaceDigest !== digest) {
+          return writeResult("access_restricted", "Workspace context changed");
+        }
+        this.writeWorkspaceDigest = digest;
+      }
+      return writeResult("verified", "Safety context verified");
+    } catch (error) {
+      return mapWriteError(error);
+    }
+  }
+
+  async #prepareWrite() {
+    const before = await this.detectSafetyStop();
+    if (before.status !== "verified") return before;
+    try {
+      const fingerprint = await this.getAccountFingerprint();
+      if (this.writeFingerprint && this.writeFingerprint !== fingerprint) {
+        return writeResult("access_restricted", "Account context changed");
+      }
+      this.writeFingerprint = fingerprint;
+    } catch (error) {
+      return mapWriteError(error);
+    }
+    return this.detectSafetyStop();
+  }
+
+  async #clickUnique({ control, selector, pattern, exactText }) {
+    const safety = await this.detectSafetyStop();
+    if (safety.status !== "verified") return safety;
+    let observation;
+    try {
+      observation = await this.page.evaluate(({ command, control, selector, pattern, exactText, destructive }) => {
+        const visible = (node) => node.getClientRects().length > 0
+          && !["hidden", "collapse"].includes(getComputedStyle(node).visibility)
+          && getComputedStyle(node).opacity !== "0";
+        const normalize = (node) => (node.innerText || node.textContent || node.getAttribute("aria-label") || "").normalize("NFC").trim();
+        const allowed = new RegExp(pattern, "i");
+        const forbidden = new RegExp(destructive, "i");
+        const matches = [...document.querySelectorAll(selector)].filter(visible).filter((node) => {
+          const text = normalize(node);
+          return exactText === undefined ? allowed.test(text) : text === exactText;
+        });
+        const destructiveMatch = matches.some((node) => forbidden.test(normalize(node)) || node.getAttribute("data-destructive") === "true");
+        if (matches.length === 1 && !destructiveMatch) matches[0].click();
+        return { command, control, count: matches.length, destructive: destructiveMatch };
+      }, {
+        command: "click",
+        control,
+        selector,
+        pattern: pattern.source,
+        exactText,
+        destructive: patterns.destructiveControl.source,
+      });
+    } catch (error) {
+      return mapWriteError(error);
+    }
+    if (observation?.count !== 1 || observation.destructive) {
+      return writeResult("selector_missing", "Required control is missing or ambiguous");
+    }
+    const after = await this.detectSafetyStop();
+    return after.status === "verified" ? writeResult("verified", "Control activated") : after;
+  }
+
+  async #setProjectName(name) {
+    const safety = await this.detectSafetyStop();
+    if (safety.status !== "verified") return safety;
+    let result;
+    try {
+      result = await this.page.evaluate(({ command, selector, value }) => {
+        const visible = (node) => node.getClientRects().length > 0
+          && !["hidden", "collapse"].includes(getComputedStyle(node).visibility)
+          && getComputedStyle(node).opacity !== "0";
+        const inputs = [...document.querySelectorAll(selector)].filter(visible);
+        if (inputs.length !== 1) return { command, count: inputs.length };
+        const input = inputs[0];
+        const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")?.set;
+        if (setter) setter.call(input, value); else input.value = value;
+        input.dispatchEvent(new Event("input", { bubbles: true }));
+        input.dispatchEvent(new Event("change", { bubbles: true }));
+        return { command, count: 1 };
+      }, { command: "setProjectName", selector: selectors.projectName, value: name });
+    } catch (error) {
+      return mapWriteError(error);
+    }
+    if (result?.count !== 1) return writeResult("selector_missing", "Project-name field is missing or ambiguous");
+    const after = await this.detectSafetyStop();
+    return after.status === "verified" ? writeResult("verified", "Project name entered") : after;
+  }
+
+  async #navigateConversationForWrite(id) {
+    const safety = await this.detectSafetyStop();
+    if (safety.status !== "verified") return safety;
+    const target = `https://chatgpt.com/c/${id}`;
+    try { await this.page.evaluate((url) => { location.href = url; }, target); }
+    catch (error) { if (!/execution context was destroyed|navigation/i.test(error.message)) return mapWriteError(error); }
+    await this.page.waitForTimeout(500);
+    const after = await this.detectSafetyStop();
+    if (after.status !== "verified") return after;
+    let current;
+    try { current = new URL(this.page.url()); } catch { return writeResult("uncertain", "Conversation URL is unavailable"); }
+    if (current.origin !== "https://chatgpt.com" || current.pathname !== `/c/${id}`) {
+      return writeResult("uncertain", "Requested conversation did not load");
+    }
+    return writeResult("verified", "Conversation loaded by full ID");
+  }
+
+  async #observeConversationLocation(id, expected) {
+    const safety = await this.detectSafetyStop();
+    if (safety.status !== "verified") return safety;
+    let snapshot;
+    try {
+      snapshot = await this.page.evaluate(({ command, selectors, archived }) => {
+        const visible = (node) => node.getClientRects().length > 0
+          && !["hidden", "collapse"].includes(getComputedStyle(node).visibility)
+          && getComputedStyle(node).opacity !== "0";
+        const names = [...document.querySelectorAll(selectors.conversationProject)].filter(visible)
+          .map((node) => (node.innerText || node.textContent || "").normalize("NFC").trim()).filter(Boolean);
+        const archivedPattern = new RegExp(archived, "i");
+        const archivedState = [...document.querySelectorAll(selectors.archivedState)].filter(visible)
+          .some((node) => archivedPattern.test((node.innerText || node.textContent || node.getAttribute("aria-label") || "").trim()));
+        return { command, url: location.href, projectNames: names, archived: archivedState };
+      }, { command: "conversationState", selectors, archived: patterns.archivedState.source });
+    } catch (error) {
+      return mapWriteError(error);
+    }
+    let url;
+    try { url = new URL(snapshot?.url); } catch { return writeResult("uncertain", "Conversation state URL is unavailable"); }
+    if (url.origin !== "https://chatgpt.com" || url.pathname !== `/c/${id}`) {
+      return writeResult("uncertain", "Conversation location cannot be confirmed");
+    }
+    if (expected === "archived") {
+      return snapshot.archived
+        ? writeResult("verified", "Archived state observed")
+        : writeResult("uncertain", "Archived state was not observed");
+    }
+    const exact = (snapshot.projectNames || []).filter((name) => name === expected);
+    return exact.length === 1 && snapshot.archived !== true
+      ? writeResult("verified", "Exact destination Project observed")
+      : writeResult("uncertain", "Exact destination Project was not observed");
+  }
+
+  async createProject(name) {
+    validateProjectName(name);
+    const prepared = await this.#prepareWrite();
+    if (prepared.status !== "verified") return prepared;
+    let projects;
+    try { projects = await this.listProjects(); } catch (error) { return mapWriteError(error); }
+    if (projects.filter((project) => project.name === name).length === 1) {
+      return writeResult("verified", "Project already exists");
+    }
+    let step = await this.#clickUnique({ control: "create", selector: selectors.createProjectControl, pattern: patterns.createProject });
+    if (step.status !== "verified") return step;
+    step = await this.#setProjectName(name);
+    if (step.status !== "verified") return step;
+    step = await this.#clickUnique({ control: "createSubmit", selector: selectors.projectDialogSubmit, pattern: patterns.projectSubmit });
+    if (step.status !== "verified") return step;
+    await this.page.waitForTimeout(500);
+    try { projects = await this.listProjects(); } catch (error) { return mapWriteError(error); }
+    return projects.filter((project) => project.name === name).length === 1
+      ? writeResult("verified", "Created Project observed")
+      : writeResult("uncertain", "Created Project was not observed");
+  }
+
+  async moveConversation(id, project) {
+    validateConversationId(id);
+    validateProjectName(project);
+    const prepared = await this.#prepareWrite();
+    if (prepared.status !== "verified") return prepared;
+    let step = await this.#navigateConversationForWrite(id);
+    if (step.status !== "verified") return step;
+    const current = await this.#observeConversationLocation(id, project);
+    if (current.status === "verified") return writeResult("verified", "Conversation already has the exact destination Project");
+    if (current.status !== "uncertain") return current;
+    step = await this.#clickUnique({ control: "header", selector: selectors.headerOptions, pattern: /.*/ });
+    if (step.status !== "verified") return step;
+    step = await this.#clickUnique({ control: "move", selector: selectors.openMenuItems, pattern: patterns.moveControl });
+    if (step.status !== "verified") return step;
+    step = await this.#clickUnique({ control: "destination", selector: selectors.projectChoices, pattern: /.*/, exactText: project });
+    if (step.status !== "verified") return step;
+    await this.page.waitForTimeout(500);
+    return this.#observeConversationLocation(id, project);
+  }
+
+  async archiveConversation(id) {
+    validateConversationId(id);
+    const prepared = await this.#prepareWrite();
+    if (prepared.status !== "verified") return prepared;
+    let step = await this.#navigateConversationForWrite(id);
+    if (step.status !== "verified") return step;
+    const current = await this.#observeConversationLocation(id, "archived");
+    if (current.status === "verified") return writeResult("verified", "Conversation is already archived");
+    if (current.status !== "uncertain") return current;
+    step = await this.#clickUnique({ control: "header", selector: selectors.headerOptions, pattern: /.*/ });
+    if (step.status !== "verified") return step;
+    step = await this.#clickUnique({ control: "archive", selector: selectors.openMenuItems, pattern: patterns.archiveControl });
+    if (step.status !== "verified") return step;
+    await this.page.waitForTimeout(500);
+    return this.#observeConversationLocation(id, "archived");
+  }
+
+  async verifyConversationLocation(id, expected) {
+    validateConversationId(id);
+    if (expected !== "archived") validateProjectName(expected);
+    const prepared = await this.#prepareWrite();
+    if (prepared.status !== "verified") return prepared;
+    const navigation = await this.#navigateConversationForWrite(id);
+    if (navigation.status !== "verified") return navigation;
+    return this.#observeConversationLocation(id, expected);
   }
 
   async readConversation(id) {
