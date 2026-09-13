@@ -27,17 +27,35 @@ function setup(t, { loggedIn = true, status = 200, accountId = "fixture-account"
   const location = { get href() { return url; }, set href(value) { url = value; }, get origin() { return new URL(url).origin; } };
   const nav = { scrollTop: 0, scrollHeight: 600, clientHeight: 600 };
   let messages = [{ getAttribute: () => "user", querySelector: () => null, innerText: "Synthetic message" }];
+  const projectUI = { regions: 1, expanded: "true", busy: false, uncertain: false, status: "", more: false, entries: [
+    { name: "  Re\u0301search  ", url: "https://chatgpt.com/g/g-p-fixture-research/project" },
+    { name: "Work  Notes", url: "https://chatgpt.com/g/g-p-fixture-work/project" },
+  ] };
+  const visibleNode = { getClientRects: () => [1] };
+  const projectRegion = {
+    ...visibleNode,
+    getAttribute: (name) => name === "aria-expanded" ? projectUI.expanded : name === "aria-busy" ? String(projectUI.busy) : null,
+    querySelectorAll: (selector) => {
+      if (selector === selectors.projectLinks) return projectUI.entries.map((entry) => ({ ...visibleNode, href: entry.url, innerText: entry.name, visibility: entry.visibility || "visible" }));
+      if (selector === selectors.projectUncertainState) return projectUI.uncertain ? [visibleNode] : [];
+      if (selector === selectors.projectStatus) return projectUI.status ? [{ ...visibleNode, innerText: projectUI.status }] : [];
+      if (selector === selectors.projectControls) return projectUI.more ? [{ ...visibleNode, innerText: "Show more" }] : [];
+      return [];
+    },
+  };
   const document = {
     title: "Synthetic detail - ChatGPT",
     querySelector: (selector) => selector === selectors.historyNavigation && loggedIn ? nav : null,
     querySelectorAll: (selector) => {
       if (selector === "button" && !loggedIn) return [{ getClientRects: () => [1], getAttribute: () => null, textContent: "Log in" }];
       if (selector === selectors.messageRoles) return messages;
+      if (selector === selectors.projectsRegion) return Array(projectUI.regions).fill(projectRegion);
       return [];
     },
   };
   page.evaluate = async (fn, arg) => {
-    const result = vm.runInNewContext(`(${fn.toString()})(arg)`, { arg, document, location });
+    const result = vm.runInNewContext(`(${fn.toString()})(arg)`, { arg, document, location,
+      getComputedStyle: (node) => ({ visibility: node.visibility || "visible", opacity: "1" }) });
     return result === undefined ? undefined : JSON.parse(JSON.stringify(result));
   };
   let closed = 0;
@@ -52,7 +70,7 @@ function setup(t, { loggedIn = true, status = 200, accountId = "fixture-account"
   };
   const adapter = new ChatGPTAdapter({ paths, browser });
   t.after(() => adapter.close());
-  return { paths, page, adapter, closed: () => closed, setLoggedIn: (value) => { loggedIn = value; }, setMessages: (value) => { messages = value; } };
+  return { paths, page, adapter, projectUI, closed: () => closed, setLoggedIn: (value) => { loggedIn = value; }, setMessages: (value) => { messages = value; } };
 }
 
 test("discovery captures native responses, merges IDs, and limits private normalized output", async (t) => {
@@ -283,4 +301,93 @@ test("a delayed old session cannot restore identity after a newer empty session"
   page.emit("response", { url: () => "https://chatgpt.com/api/auth/session", status: () => 200, json: async () => ({}) });
   resolveOld({ user: { id: "fixture-account" } });
   await assert.rejects(adapter.getAccountFingerprint(), /login|account context/i);
+});
+
+test("lists visible native Projects with exact normalized names and deduplicates repeated entries", async (t) => {
+  const { adapter, projectUI } = setup(t);
+  projectUI.entries.push({ ...projectUI.entries[0] });
+  assert.deepEqual(await adapter.listProjects(), [
+    { name: "Résearch", url: "https://chatgpt.com/g/g-p-fixture-research/project" },
+    { name: "Work  Notes", url: "https://chatgpt.com/g/g-p-fixture-work/project" },
+  ]);
+});
+
+test("Project listing excludes CSS-hidden entries", async (t) => {
+  const { adapter, projectUI } = setup(t);
+  projectUI.entries = [
+    { name: "Visible synthetic project", url: "https://chatgpt.com/g/g-p-fixture-visible/project" },
+    { name: "Hidden synthetic project", url: "https://chatgpt.com/g/g-p-fixture-hidden/project", visibility: "hidden" },
+  ];
+  assert.deepEqual(await adapter.listProjects(), [{ name: "Visible synthetic project", url: "https://chatgpt.com/g/g-p-fixture-visible/project" }]);
+});
+
+test("accepts an empty Projects inventory only with a stable expanded region or explicit empty state", async (t) => {
+  for (const explicit of [false, true]) {
+    const { adapter, projectUI } = setup(t);
+    projectUI.entries = [];
+    if (explicit) { projectUI.expanded = null; projectUI.status = "暂无项目"; }
+    assert.deepEqual(await adapter.listProjects(), []);
+  }
+});
+
+for (const [name, change] of [
+  ["missing region", { regions: 0 }],
+  ["ambiguous region", { regions: 2 }],
+  ["collapsed region", { expanded: "false" }],
+  ["loading region", { busy: true }],
+  ["error or uncertain state", { uncertain: true }],
+  ["unobserved additional entries", { more: true }],
+  ["unverified empty region", { entries: [], expanded: null }],
+  ["empty project name", { entries: [{ name: "  ", url: "https://chatgpt.com/g/g-p-fixture/project" }] }],
+  ["unsupported project URL", { entries: [{ name: "Synthetic", url: "https://example.invalid/g/g-p-fixture/project" }] }],
+]) {
+  test(`Project listing rejects ${name}`, async (t) => {
+    const { adapter, projectUI } = setup(t);
+    Object.assign(projectUI, change);
+    await assert.rejects(adapter.listProjects(), /project/i);
+  });
+}
+
+test("Project listing rejects duplicate normalized names pointing to different native URLs", async (t) => {
+  const { adapter, projectUI } = setup(t);
+  projectUI.entries = [
+    { name: " Re\u0301search ", url: "https://chatgpt.com/g/g-p-fixture-first/project" },
+    { name: "Résearch", url: "https://chatgpt.com/g/g-p-fixture-second/project" },
+  ];
+  await assert.rejects(adapter.listProjects(), /ambiguous|duplicate/i);
+});
+
+test("Project listing rejects DOM changes between its bounded observations", async (t) => {
+  const { adapter, projectUI, page } = setup(t);
+  page.waitForTimeout = async () => { projectUI.entries[0].name = "Changed synthetic name"; };
+  await assert.rejects(adapter.listProjects(), /project.*changed|unstable/i);
+});
+
+test("Project listing stops on authentication loss during observation", async (t) => {
+  const { adapter, page } = setup(t);
+  page.waitForTimeout = async () => {
+    page.emit("response", { url: () => "https://chatgpt.com/api/auth/session", status: () => 200, json: async () => ({}) });
+  };
+  await assert.rejects(adapter.listProjects(), /login|account context/i);
+});
+
+test("discover persists validated Projects atomically and preserves a prior inventory on uncertainty", async (t) => {
+  const output = { write() {} };
+  const success = setup(t);
+  assert.equal(await main(["discover", "--max", "1"], { ...success, stdout: output, stderr: output }), 0);
+  const target = path.join(success.paths.raw, "projects.json");
+  assert.deepEqual(JSON.parse(fs.readFileSync(target)), [
+    { name: "Résearch", url: "https://chatgpt.com/g/g-p-fixture-research/project" },
+    { name: "Work  Notes", url: "https://chatgpt.com/g/g-p-fixture-work/project" },
+  ]);
+  assert.equal(fs.statSync(target).mode & 0o777, 0o600);
+  assert.equal(fs.existsSync(`${target}.tmp`), false);
+  const failure = setup(t);
+  failure.projectUI.regions = 0;
+  const priorTarget = path.join(failure.paths.raw, "projects.json");
+  const prior = '[{"name":"Synthetic prior","url":"https://chatgpt.com/g/g-p-fixture-prior/project"}]\n';
+  fs.mkdirSync(failure.paths.raw, { recursive: true });
+  fs.writeFileSync(priorTarget, prior);
+  assert.equal(await main(["discover", "--max", "1"], { ...failure, stdout: output, stderr: output }), 1);
+  assert.equal(fs.readFileSync(priorTarget, "utf8"), prior);
 });

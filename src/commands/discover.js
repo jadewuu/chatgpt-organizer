@@ -1,3 +1,4 @@
+const path = require("node:path");
 const { createPaths } = require("../core/paths");
 const { ChatGPTAdapter } = require("../providers/chatgpt/adapter");
 
@@ -11,8 +12,12 @@ async function run(argv = [], deps = {}) {
   }
   const adapter = deps.adapter || new ChatGPTAdapter({ paths: deps.paths || createPaths(deps.rootDir), chromeExecutable: deps.chromeExecutable });
   try {
+    const projects = await adapter.listProjects();
     const records = await adapter.discoverConversations({ max });
+    await adapter.getAccountFingerprint();
+    adapter.writeJson(path.join(adapter.paths.raw, "projects.json"), projects);
     (deps.stdout || process.stdout).write(`Discovered ${records.length} conversations in .local/raw/conversations.json\n`);
+    (deps.stdout || process.stdout).write(`Observed ${projects.length} Projects in .local/raw/projects.json\n`);
     return 0;
   } finally { await adapter.close(); }
 }

@@ -214,6 +214,62 @@ class ChatGPTAdapter {
     return records;
   }
 
+  async listProjects() {
+    await this.open();
+    const observe = async () => {
+      await this.getAccountFingerprint();
+      if (!(await this.loginState()).loggedIn) throw new Error("Login required in the dedicated profile; stopped");
+      const snapshot = await this.page.evaluate(({ selectors, noProjects, moreProjects }) => {
+        const visible = (node) => node.getClientRects().length > 0
+          && !["hidden", "collapse"].includes(getComputedStyle(node).visibility) && getComputedStyle(node).opacity !== "0";
+        const regions = [...document.querySelectorAll(selectors.projectsRegion)].filter(visible);
+        if (regions.length !== 1) return null;
+        const region = regions[0];
+        const uncertain = region.getAttribute("aria-expanded") === "false" || region.getAttribute("aria-busy") === "true"
+          || [...region.querySelectorAll(selectors.projectUncertainState)].some(visible)
+          || [...region.querySelectorAll(selectors.projectControls)].filter(visible).some((node) => new RegExp(moreProjects, "i").test((node.innerText || "").trim()));
+        return {
+          url: location.href,
+          uncertain,
+          expanded: region.getAttribute("aria-expanded") === "true",
+          emptyState: [...region.querySelectorAll(selectors.projectStatus)].filter(visible).some((node) => new RegExp(noProjects, "i").test((node.innerText || "").trim())),
+          entries: [...region.querySelectorAll(selectors.projectLinks)].filter(visible).map((node) => ({ name: node.innerText, url: node.href })),
+        };
+      }, { selectors, noProjects: patterns.noProjects.source, moreProjects: patterns.moreProjects.source });
+      await this.checkResponses();
+      if (!(await this.loginState()).loggedIn) throw new Error("Login required in the dedicated profile; stopped");
+      if (!snapshot || snapshot.uncertain || new URL(snapshot.url).origin !== "https://chatgpt.com") {
+        throw new Error("Project region is missing, ambiguous, collapsed, or uncertain; inventory unchanged");
+      }
+      if ((!snapshot.entries.length && !snapshot.expanded && !snapshot.emptyState) || (snapshot.entries.length && snapshot.emptyState)) {
+        throw new Error("Project empty state is uncertain; inventory unchanged");
+      }
+      const names = new Map();
+      const urls = new Map();
+      for (const entry of snapshot.entries) {
+        const name = typeof entry.name === "string" ? entry.name.normalize("NFC").trim() : "";
+        let url;
+        try { url = new URL(entry.url); } catch { throw new Error("Unsupported Project URL; inventory unchanged"); }
+        if (!name || url.origin !== "https://chatgpt.com" || !patterns.projectPath.test(url.pathname)) {
+          throw new Error("Project name or URL is empty or unsupported; inventory unchanged");
+        }
+        const canonicalUrl = `${url.origin}${url.pathname}`;
+        if ((names.has(name) && names.get(name) !== canonicalUrl) || (urls.has(canonicalUrl) && urls.get(canonicalUrl) !== name)) {
+          throw new Error("Ambiguous Project names or URLs; inventory unchanged");
+        }
+        names.set(name, canonicalUrl);
+        urls.set(canonicalUrl, name);
+      }
+      return [...names].map(([name, url]) => ({ name, url }));
+    };
+    const first = await observe();
+    await this.page.waitForTimeout(500);
+    const second = await observe();
+    if (JSON.stringify(first) !== JSON.stringify(second)) throw new Error("Project inventory changed between observations; stopped");
+    await this.checkResponses();
+    return second;
+  }
+
   async readConversation(id) {
     if (typeof id !== "string" || !/^[A-Za-z0-9_-]+$/.test(id)) throw new Error("Invalid conversation ID");
     await this.open();
