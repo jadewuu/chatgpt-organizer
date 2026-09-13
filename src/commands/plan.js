@@ -65,18 +65,79 @@ function loadEffectiveConfig(rootDir, deps) {
   return target ? (deps.loadConfig || loadConfig)(target) : { provider: "chatgpt", classification: { moveThreshold: 0.95, fullContentBelow: 0.9 } };
 }
 
-function updatePhase(paths, expected, next) {
+const validPhases = new Set([
+  "PREFLIGHT", "AUTHENTICATE", "DISCOVER", "TAXONOMY_REVIEW", "CLASSIFY", "PLAN_REVIEW",
+  "PILOT_APPROVAL", "PILOT", "APPLY_APPROVAL", "APPLY", "VERIFY", "COMPLETE",
+]);
+
+function requireRunState(paths) {
   const state = loadRunState(paths);
-  if (!state || state.phase !== expected) return state;
-  transitionState(state, next);
-  saveRunState(paths, state);
+  if (!state || typeof state.runId !== "string" || !state.runId
+    || typeof state.accountFingerprint !== "string" || !state.accountFingerprint
+    || !validPhases.has(state.phase)) {
+    throw new Error("Persisted run state is required before planning");
+  }
   return state;
 }
 
+function parseArguments(argv) {
+  if (!Array.isArray(argv)) throw new Error("plan arguments must be an array");
+  if (argv.length === 0) return false;
+  if (argv.length === 1 && argv[0] === "--allow-full-content") return true;
+  throw new Error("plan accepts only --allow-full-content");
+}
+
+function readClassificationInput(inputPath, conversations) {
+  if (!fs.existsSync(inputPath)) throw new Error("Missing first-pass classification-input.jsonl");
+  let text;
+  try { text = fs.readFileSync(inputPath, "utf8"); }
+  catch (error) { throw new Error(`Unable to read classification input: ${error.message}`); }
+  const lines = text.split(/\r?\n/);
+  if (lines.at(-1) === "") lines.pop();
+  if (!lines.length || lines.some((line) => !line.trim())) throw new Error("Malformed classification-input.jsonl");
+  const inventoryIds = new Set();
+  for (const conversation of conversations) {
+    if (!conversation || typeof conversation.conversationId !== "string") throw new Error("Invalid conversation inventory");
+    if (inventoryIds.has(conversation.conversationId)) throw new Error(`Duplicate conversation ID: ${conversation.conversationId}`);
+    inventoryIds.add(conversation.conversationId);
+  }
+  const seen = new Set();
+  const rows = lines.map((line) => {
+    let row;
+    try { row = JSON.parse(line); } catch (error) { throw new Error(`Malformed classification-input.jsonl: ${error.message}`); }
+    if (!row || typeof row !== "object" || Array.isArray(row)
+      || typeof row.conversationId !== "string" || !row.conversationId
+      || typeof row.title !== "string"
+      || !Object.hasOwn(row, "createdAt") || !Object.hasOwn(row, "updatedAt")
+      || ![row.createdAt, row.updatedAt].every((value) => value === null || (typeof value === "number" && Number.isFinite(value)))
+      || typeof row.firstUserMessage !== "string" || typeof row.lastUserMessage !== "string") {
+      throw new Error("Malformed classification-input.jsonl");
+    }
+    if (seen.has(row.conversationId)) throw new Error(`Duplicate classification input ID: ${row.conversationId}`);
+    if (!inventoryIds.has(row.conversationId)) throw new Error(`Unknown classification input ID: ${row.conversationId}`);
+    seen.add(row.conversationId);
+    return row;
+  });
+  if (seen.size !== inventoryIds.size) throw new Error("Stale classification-input.jsonl: IDs do not match inventory");
+  return rows;
+}
+
+function requireClassificationSet(classifications, conversations) {
+  const inventoryIds = new Set(conversations.map((conversation) => conversation.conversationId));
+  const seen = new Set();
+  for (const classification of classifications) {
+    if (seen.has(classification.conversationId)) throw new Error(`Duplicate classification ID: ${classification.conversationId}`);
+    if (!inventoryIds.has(classification.conversationId)) throw new Error(`Unknown classification ID: ${classification.conversationId}`);
+    seen.add(classification.conversationId);
+  }
+  if (seen.size !== inventoryIds.size) throw new Error("Classifications do not match current inventory");
+}
+
 async function run(argv = [], deps = {}) {
-  if (argv.length) throw new Error("plan does not accept arguments");
+  const allowFullContent = parseArguments(argv);
   const rootDir = path.resolve(deps.rootDir || process.cwd());
   const paths = deps.paths || createPaths(rootDir);
+  const state = requireRunState(paths);
   const plans = paths.plans;
   const taxonomyPath = path.join(plans, "taxonomy.yaml");
   const inputPath = path.join(plans, "classification-input.jsonl");
@@ -84,14 +145,23 @@ async function run(argv = [], deps = {}) {
   const planPath = path.join(plans, "migration-plan.json");
   const config = loadEffectiveConfig(rootDir, deps);
 
-  if (!fs.existsSync(taxonomyPath)) {
-    const taxonomy = validateTaxonomy(starterTaxonomy(rootDir, config));
-    writePrivate(paths, taxonomyPath, YAML.stringify(taxonomy));
-    const message = "Seeded .local/plans/taxonomy.yaml. Customize and approve the taxonomy, then run plan again.";
+  if (state.phase === "DISCOVER") {
+    if (allowFullContent) throw new Error("Full-content review requires CLASSIFY phase");
+    let taxonomy;
+    if (fs.existsSync(taxonomyPath)) {
+      taxonomy = validateTaxonomy(taxonomyFromFile(YAML.parse(fs.readFileSync(taxonomyPath, "utf8"))));
+    } else {
+      taxonomy = validateTaxonomy(starterTaxonomy(rootDir, config));
+      writePrivate(paths, taxonomyPath, YAML.stringify(taxonomy));
+    }
+    transitionState(state, "TAXONOMY_REVIEW");
+    saveRunState(paths, state);
+    const message = "Prepared .local/plans/taxonomy.yaml and entered TAXONOMY_REVIEW. Customize and approve the taxonomy, then run plan again.";
     (deps.stdout || process.stdout).write(`${message}\n`);
     return 0;
   }
 
+  if (!fs.existsSync(taxonomyPath)) throw new Error(`Missing taxonomy artifact for phase ${state.phase}`);
   const taxonomy = validateTaxonomy(taxonomyFromFile(YAML.parse(fs.readFileSync(taxonomyPath, "utf8"))));
   const effectiveConfig = { ...config, taxonomy };
   const conversations = readJson(path.join(paths.raw, "conversations.json"));
@@ -101,36 +171,52 @@ async function run(argv = [], deps = {}) {
   const existingProjects = fs.existsSync(projectsPath) ? readJson(projectsPath) : [];
   if (!Array.isArray(existingProjects)) throw new Error("Invalid local Project inventory");
 
-  if (!fs.existsSync(classificationsPath)) {
-    const state = loadRunState(paths);
-    if (state && !["TAXONOMY_REVIEW", "CLASSIFY"].includes(state.phase)) {
-      throw new Error(`Cannot prepare classifications from phase ${state.phase}`);
-    }
+  if (state.phase === "TAXONOMY_REVIEW") {
+    if (allowFullContent) throw new Error("Full-content review requires CLASSIFY phase");
     const input = buildClassificationInput(conversations, extracted, effectiveConfig, {
-      allowFullContent: deps.allowFullContent === true,
-      priorClassifications: deps.priorClassifications || [],
       maxExcerptCodePoints: deps.maxExcerptCodePoints,
     });
     writePrivate(paths, inputPath, `${input.map((item) => JSON.stringify(item)).join("\n")}\n`);
-    updatePhase(paths, "TAXONOMY_REVIEW", "CLASSIFY");
+    transitionState(state, "CLASSIFY");
+    saveRunState(paths, state);
     const message = "Wrote .local/plans/classification-input.jsonl. Produce schema-valid classifications.json, then run plan again.";
     (deps.stdout || process.stdout).write(`${message}\n`);
     return 0;
   }
 
-  const classifications = readJson(classificationsPath);
-  validateClassifications(classifications);
-  const stateBeforePlan = loadRunState(paths);
-  if (stateBeforePlan && !["CLASSIFY", "PLAN_REVIEW"].includes(stateBeforePlan.phase)) {
-    throw new Error(`Cannot build migration plan from phase ${stateBeforePlan.phase}`);
+  if (!["CLASSIFY", "PLAN_REVIEW"].includes(state.phase)) {
+    throw new Error(`Cannot build migration plan from phase ${state.phase}`);
   }
+
+  const classifications = readJson(classificationsPath);
+  if (classifications === null) throw new Error("Missing schema-valid classifications.json");
+  validateClassifications(classifications);
+  requireClassificationSet(classifications, conversations);
+  readClassificationInput(inputPath, conversations);
+
+  if (allowFullContent) {
+    if (state.phase !== "CLASSIFY") throw new Error("Full-content review requires CLASSIFY phase");
+    const input = buildClassificationInput(conversations, extracted, effectiveConfig, {
+      allowFullContent: true,
+      priorClassifications: classifications,
+      maxExcerptCodePoints: deps.maxExcerptCodePoints,
+    });
+    writePrivate(paths, inputPath, `${input.map((item) => JSON.stringify(item)).join("\n")}\n`);
+    const message = "Wrote additional excerpts for low-confidence conversations. Revise classifications.json and run plan again.";
+    (deps.stdout || process.stdout).write(`${message}\n`);
+    return 0;
+  }
+
   const plan = buildMigrationPlan(conversations, classifications, effectiveConfig, existingProjects, { now: deps.now });
   writePrivate(paths, planPath, `${JSON.stringify(plan, null, 2)}\n`);
-  const state = updatePhase(paths, "CLASSIFY", "PLAN_REVIEW");
-  const phase = state?.phase || "PLAN_REVIEW";
+  if (state.phase === "CLASSIFY") {
+    transitionState(state, "PLAN_REVIEW");
+    saveRunState(paths, state);
+  }
+  const phase = state.phase;
   const message = `Wrote .local/plans/migration-plan.json; phase is ${phase}. Review the plan before any approval.`;
   (deps.stdout || process.stdout).write(`${message}\n`);
   return 0;
 }
 
-module.exports = { run, writePrivate, readExtracted };
+module.exports = { run, writePrivate, readExtracted, readClassificationInput };

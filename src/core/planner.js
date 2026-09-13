@@ -52,6 +52,16 @@ function userMessages(record) {
   return asArray(record?.messages).filter((message) => message && message.role === "user" && typeof message.text === "string");
 }
 
+function assertChatGPTConversation(conversation) {
+  if (!conversation || conversation.provider !== "chatgpt"
+    || typeof conversation.conversationId !== "string"
+    || !/^[A-Za-z0-9_-]+$/.test(conversation.conversationId)
+    || conversation.url !== `https://chatgpt.com/c/${conversation.conversationId}`) {
+    throw new Error("Invalid ChatGPT conversation provider, ID, or URL");
+  }
+  return conversation;
+}
+
 function buildClassificationInput(conversations, extracted = [], config = {}, options = {}) {
   if (!Array.isArray(conversations)) throw new Error("conversations must be an array");
   const records = extractedById(extracted);
@@ -59,7 +69,7 @@ function buildClassificationInput(conversations, extracted = [], config = {}, op
   const limit = excerptLimit(config, options);
   const threshold = classificationConfig(config).fullContentBelow ?? 0.9;
   return conversations.map((conversation) => {
-    if (!conversation || typeof conversation.conversationId !== "string") throw new Error("Invalid conversation record");
+    assertChatGPTConversation(conversation);
     const messages = userMessages(records.get(conversation.conversationId));
     const first = messages[0]?.text || "";
     const last = messages.at(-1)?.text || "";
@@ -141,7 +151,7 @@ function buildMigrationPlan(conversations, classifications, config = {}, existin
   validateClassifications(classifications);
   const conversationIds = new Set();
   for (const conversation of conversations) {
-    if (!conversation || typeof conversation.conversationId !== "string") throw new Error("Invalid conversation record");
+    assertChatGPTConversation(conversation);
     if (conversationIds.has(conversation.conversationId)) throw new Error(`Duplicate conversation ID: ${conversation.conversationId}`);
     conversationIds.add(conversation.conversationId);
   }

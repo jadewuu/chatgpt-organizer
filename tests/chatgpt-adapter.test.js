@@ -6,6 +6,7 @@ const path = require("node:path");
 const { EventEmitter } = require("node:events");
 const vm = require("node:vm");
 const { createPaths } = require("../src/core/paths");
+const { createRunState, saveRunState, loadRunState } = require("../src/core/state");
 const { ChatGPTAdapter } = require("../src/providers/chatgpt/adapter");
 const { createBrowser } = require("../src/providers/chatgpt/browser");
 const { selectors } = require("../src/providers/chatgpt/selectors");
@@ -391,6 +392,28 @@ test("discover persists validated Projects atomically and preserves a prior inve
   fs.writeFileSync(priorTarget, prior);
   assert.equal(await main(["discover", "--max", "1"], { ...failure, stdout: output, stderr: output }), 1);
   assert.equal(fs.readFileSync(priorTarget, "utf8"), prior);
+});
+
+test("successful discover persists a new verified run state and advances only through DISCOVER", async (t) => {
+  const { adapter, paths } = setup(t);
+  const output = { write() {} };
+  assert.equal(await main(["discover", "--max", "1"], { adapter, paths, stdout: output, stderr: output }), 0);
+  const state = loadRunState(paths);
+  assert.match(state.runId, /^[0-9a-f-]{36}$/i);
+  assert.match(state.accountFingerprint, /^[a-f0-9]{16}$/);
+  assert.equal(state.phase, "DISCOVER");
+});
+
+test("successful discover resumes AUTHENTICATE without rewinding a later phase", async (t) => {
+  const { adapter, paths } = setup(t);
+  const output = { write() {} };
+  const fingerprint = require("node:crypto").createHash("sha256").update("fixture-account").digest("hex").slice(0, 16);
+  const state = createRunState("existing-run", fingerprint);
+  state.phase = "AUTHENTICATE";
+  saveRunState(paths, state);
+  assert.equal(await main(["discover", "--max", "1"], { adapter, paths, stdout: output, stderr: output }), 0);
+  assert.equal(loadRunState(paths).runId, "existing-run");
+  assert.equal(loadRunState(paths).phase, "DISCOVER");
 });
 
 test("discover preserves the exact prior Projects inventory when an expanded region has no empty-state marker", async (t) => {
