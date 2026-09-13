@@ -7,6 +7,10 @@ Read `AGENTS.md`, `docs/workflow.md`, and `docs/safety.md` before operating on a
 
 Semantic reasoning comes from the user's own Codex or Claude Code session. The repository has no maintainer-owned API key, hosted backend, or maintainer-operated data service. Codex and Claude Code are supported agent runtimes for this repository, but this does not provide Claude Web history or provider compatibility.
 
+Planning and classification contract: `pnpm organizer plan` is read-only and keeps all private IDs and content below `.local/`. The first classification pass contains only each title, created/updated timestamps, first user message, and last user message. Process `classification-input.jsonl` in bounded batches. Request additional excerpts only when the user has allowed full-content review and the prior exact conversation ID has confidence below `fullContentBelow`. Write only schema-valid `classifications.json`; every row must use an exact input `conversationId`, a confidence from 0 through 1, and a concise reason. Never classify an unresolved conversation as `archive`; archive is independent and always requires an `archiveReason`.
+
+Before marking a taxonomy reviewed, show representative conversation-title samples and estimated counts for every proposed Project, and ask the user to approve or customize it. Taxonomy approval and plan review are separate explicit checkpoints; a classification artifact is not write authorization.
+
 1. Run `pnpm organizer doctor` and report failures.
 2. Use `pnpm organizer login` only when authentication is required.
 3. Run `pnpm organizer plan`; keep all actions read-only.
