@@ -11,6 +11,19 @@ const { createRunState, loadRunState, saveRunState } = require("../src/core/stat
 const { buildClassificationInput } = require("../src/core/planner");
 const { run } = require("../src/commands/plan");
 
+function createSymlinkOrSkip(t, target, linkPath, type) {
+  try {
+    fs.symlinkSync(target, linkPath, type);
+    return true;
+  } catch (error) {
+    if (["EACCES", "EPERM", "ENOSYS"].includes(error.code)) {
+      t.skip(`symlinks unavailable: ${error.code}`);
+      return false;
+    }
+    throw error;
+  }
+}
+
 const taxonomy = {
   projects: [
     { name: "Work & <Team>", description: "Work \"items\" & plans", include: [], exclude: [] },
@@ -100,6 +113,36 @@ test("renderReviewHtml is deterministic and has no external resources", () => {
   assert.doesNotMatch(first, /@import\s+url|fetch\s*\(|XMLHttpRequest|eval\s*\(/i);
 });
 
+test("unresolved counts and bucket include only unresolved statuses", () => {
+  const html = renderReviewHtml({
+    taxonomy,
+    plan: {
+      ...plan,
+      items: [
+        {
+          ...plan.items[1],
+          title: "Actually unresolved",
+        },
+        {
+          ...plan.items[1],
+          title: "Intentional keep",
+          project: "Work & <Team>",
+          confidence: 0.99,
+          reason: "Already belongs in the right Project",
+          suggestedAction: "keep",
+          action: "keep",
+          status: "proposed",
+        },
+      ],
+    },
+  });
+  const unresolvedSection = html.match(/<section><h2>Unresolved .*?<\/section>/s)?.[0];
+
+  assert.match(html, /<strong>1<\/strong>Unresolved/);
+  assert.match(unresolvedSection, /Actually unresolved/);
+  assert.doesNotMatch(unresolvedSection, /Intentional keep/);
+});
+
 test("plan writes a private atomic review report before entering PLAN_REVIEW", async (t) => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "chatgpt-organizer-report-"));
   t.after(() => fs.rmSync(root, { recursive: true, force: true }));
@@ -127,6 +170,10 @@ test("plan writes a private atomic review report before entering PLAN_REVIEW", a
   const state = createRunState("run", "account");
   state.phase = "CLASSIFY";
   saveRunState(paths, state);
+  fs.mkdirSync(paths.reports, { mode: 0o700 });
+  const reportEscape = path.join(root, "report-escape.txt");
+  fs.writeFileSync(reportEscape, "outside stays unchanged\n");
+  if (!createSymlinkOrSkip(t, reportEscape, path.join(paths.reports, "review.html.tmp"), "file")) return;
   const output = { chunks: [], write(value) { this.chunks.push(value); } };
 
   assert.equal(await run([], { rootDir: root, paths, stdout: output, now: "2026-09-12T00:00:00.000Z" }), 0);
@@ -134,13 +181,14 @@ test("plan writes a private atomic review report before entering PLAN_REVIEW", a
   assert.equal(fs.existsSync(reportPath), true);
   assert.equal(fs.statSync(paths.reports).mode & 0o777, 0o700);
   assert.equal(fs.statSync(reportPath).mode & 0o777, 0o600);
-  assert.equal(fs.existsSync(`${reportPath}.tmp`), false);
+  assert.equal(fs.lstatSync(`${reportPath}.tmp`).isSymbolicLink(), true);
+  assert.equal(fs.readFileSync(reportEscape, "utf8"), "outside stays unchanged\n");
   assert.match(output.chunks.at(-1), new RegExp(`${reportPath.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}`));
   assert.match(output.chunks.join(""), /No ChatGPT changes were made/i);
   assert.equal(loadRunState(paths).phase, "PLAN_REVIEW");
 });
 
-test("report write failure does not advance state", async (t) => {
+test("symlinked report directory fails closed and preserves CLASSIFY state", async (t) => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "chatgpt-organizer-report-failure-"));
   t.after(() => fs.rmSync(root, { recursive: true, force: true }));
   const paths = createPaths(root);
@@ -154,14 +202,13 @@ test("report write failure does not advance state", async (t) => {
   fs.writeFileSync(path.join(paths.plans, "classification-input.jsonl"), `${buildClassificationInput(conversations, [], config).map((row) => JSON.stringify(row)).join("\n")}\n`);
   fs.writeFileSync(path.join(paths.plans, "classifications.json"), JSON.stringify([{ conversationId: "fixture-chat-1", project: "Work", confidence: 0.99, reason: "r", suggestedAction: "move" }]));
   const state = createRunState("run", "account"); state.phase = "CLASSIFY"; saveRunState(paths, state);
-  await assert.rejects(run([], {
-    rootDir: root,
-    paths,
-    config,
-    writeReviewReport() { throw new Error("simulated report failure"); },
-  }), /simulated report failure/);
+  const outside = fs.mkdtempSync(path.join(os.tmpdir(), "chatgpt-organizer-report-outside-"));
+  t.after(() => fs.rmSync(outside, { recursive: true, force: true }));
+  if (!createSymlinkOrSkip(t, outside, paths.reports, "dir")) return;
+
+  await assert.rejects(run([], { rootDir: root, paths, config }), /symlink|directory/i);
   assert.equal(loadRunState(paths).phase, "CLASSIFY");
-  assert.equal(fs.existsSync(path.join(paths.reports, "review.html")), false);
+  assert.equal(fs.existsSync(path.join(outside, "review.html")), false);
 });
 
 test("full-content-only flow never creates a report", async (t) => {

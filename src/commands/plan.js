@@ -6,6 +6,7 @@ const { loadConfig } = require("../core/config");
 const { validateTaxonomy, validateClassifications } = require("../core/validate");
 const { loadRunState, saveRunState, transitionState } = require("../core/state");
 const { buildClassificationInput, buildMigrationPlan } = require("../core/planner");
+const { writePrivateFile } = require("../core/private-file");
 const { renderReviewHtml } = require("../reports/review");
 
 function readJson(filePath) {
@@ -14,34 +15,6 @@ function readJson(filePath) {
     if (error.code === "ENOENT") return null;
     throw new Error(`Unable to read ${filePath}: ${error.message}`);
   }
-}
-
-function writePrivate(paths, target, content) {
-  const plans = path.resolve(paths.plans);
-  const absolute = path.resolve(target);
-  if (absolute !== plans && !absolute.startsWith(`${plans}${path.sep}`)) throw new Error("Refusing plan artifact outside .local/plans");
-  fs.mkdirSync(plans, { recursive: true, mode: 0o700 });
-  fs.chmodSync(plans, 0o700);
-  const temporary = `${absolute}.tmp`;
-  fs.writeFileSync(temporary, content, { mode: 0o600 });
-  fs.chmodSync(temporary, 0o600);
-  fs.renameSync(temporary, absolute);
-  fs.chmodSync(absolute, 0o600);
-}
-
-function writePrivateReport(paths, target, content) {
-  const reports = path.resolve(paths.reports);
-  const absolute = path.resolve(target);
-  if (absolute === reports || !absolute.startsWith(`${reports}${path.sep}`)) {
-    throw new Error("Refusing report artifact outside .local/reports");
-  }
-  fs.mkdirSync(reports, { recursive: true, mode: 0o700 });
-  fs.chmodSync(reports, 0o700);
-  const temporary = `${absolute}.tmp`;
-  fs.writeFileSync(temporary, content, { mode: 0o600 });
-  fs.chmodSync(temporary, 0o600);
-  fs.renameSync(temporary, absolute);
-  fs.chmodSync(absolute, 0o600);
 }
 
 function readExtracted(paths) {
@@ -170,7 +143,7 @@ async function run(argv = [], deps = {}) {
       taxonomy = validateTaxonomy(taxonomyFromFile(YAML.parse(fs.readFileSync(taxonomyPath, "utf8"))));
     } else {
       taxonomy = validateTaxonomy(starterTaxonomy(rootDir, config));
-      writePrivate(paths, taxonomyPath, YAML.stringify(taxonomy));
+      writePrivateFile(paths, paths.plans, taxonomyPath, YAML.stringify(taxonomy));
     }
     transitionState(state, "TAXONOMY_REVIEW");
     saveRunState(paths, state);
@@ -194,7 +167,7 @@ async function run(argv = [], deps = {}) {
     const input = buildClassificationInput(conversations, extracted, effectiveConfig, {
       maxExcerptCodePoints: deps.maxExcerptCodePoints,
     });
-    writePrivate(paths, inputPath, `${input.map((item) => JSON.stringify(item)).join("\n")}\n`);
+    writePrivateFile(paths, paths.plans, inputPath, `${input.map((item) => JSON.stringify(item)).join("\n")}\n`);
     transitionState(state, "CLASSIFY");
     saveRunState(paths, state);
     const message = "Wrote .local/plans/classification-input.jsonl. Produce schema-valid classifications.json, then run plan again.";
@@ -218,16 +191,17 @@ async function run(argv = [], deps = {}) {
       priorClassifications: classifications,
       maxExcerptCodePoints: deps.maxExcerptCodePoints,
     });
-    writePrivate(paths, inputPath, `${input.map((item) => JSON.stringify(item)).join("\n")}\n`);
+    writePrivateFile(paths, paths.plans, inputPath, `${input.map((item) => JSON.stringify(item)).join("\n")}\n`);
     const message = "Wrote additional excerpts for low-confidence conversations. Revise classifications.json and run plan again.";
     (deps.stdout || process.stdout).write(`${message}\n`);
     return 0;
   }
 
   const plan = buildMigrationPlan(conversations, classifications, effectiveConfig, existingProjects, { now: deps.now });
-  writePrivate(paths, planPath, `${JSON.stringify(plan, null, 2)}\n`);
-  const writeReport = deps.writeReviewReport || deps.writeReport || writePrivateReport;
-  writeReport(paths, reportPath, renderReviewHtml({ plan, taxonomy }));
+  writePrivateFile(paths, paths.plans, planPath, `${JSON.stringify(plan, null, 2)}\n`);
+  const writeReport = deps.writeReviewReport || deps.writeReport;
+  if (writeReport) writeReport(paths, reportPath, renderReviewHtml({ plan, taxonomy }));
+  else writePrivateFile(paths, paths.reports, reportPath, renderReviewHtml({ plan, taxonomy }));
   transitionState(state, "PLAN_REVIEW");
   saveRunState(paths, state);
   const phase = state.phase;
@@ -236,4 +210,4 @@ async function run(argv = [], deps = {}) {
   return 0;
 }
 
-module.exports = { run, writePrivate, writePrivateReport, readExtracted, readClassificationInput };
+module.exports = { run, readExtracted, readClassificationInput };

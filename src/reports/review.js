@@ -76,7 +76,7 @@ function renderReviewHtml({ plan = {}, taxonomy = {} } = {}) {
   const taxonomyProjects = asArray(taxonomy.projects);
   const projects = projectRows(asArray(plan.projects), taxonomyProjects);
   const proposedMoves = items.filter((item) => item?.action === "move");
-  const unresolved = items.filter((item) => item?.status === "unresolved" || item?.action === "keep");
+  const unresolved = items.filter((item) => item?.status === "unresolved");
   const archiveCandidates = items.filter((item) => item?.suggestedAction === "archive");
   const classified = items.filter((item) => item?.project !== null && item?.project !== undefined).length;
   const createRequired = projects.filter((project) => project.createRequired);
