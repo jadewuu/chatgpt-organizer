@@ -4,6 +4,8 @@ const { validateMigrationPlan } = require("./validate");
 
 const approvalPattern = /^[a-f0-9]{64}$/;
 const stopStatuses = new Set(["rate_limited", "access_restricted", "selector_missing", "uncertain"]);
+const progressStatuses = new Set(["running", "done", "skipped", "uncertain"]);
+const DEFAULT_RESUME_MAX_ACTIONS = 25;
 
 function isPlainObject(value) {
   return value !== null && typeof value === "object" && !Array.isArray(value)
@@ -11,9 +13,11 @@ function isPlainObject(value) {
 }
 
 function actionKey(action) {
-  return JSON.stringify(action.kind === "project"
-    ? ["project", "create", action.projectName]
-    : ["conversation", action.action, action.conversationId]);
+  if (action.kind === "project") return JSON.stringify(["project", "create", action.projectName]);
+  if (action.action === "move") {
+    return JSON.stringify(["conversation", "move", action.conversationId, action.projectName]);
+  }
+  return JSON.stringify(["conversation", action.action, action.conversationId]);
 }
 
 function actionsFor(plan) {
@@ -41,14 +45,34 @@ function validateState(state, phases) {
     || !phases.includes(state.phase)) {
     throw new Error(`Invalid run state or phase; expected ${phases.join(" or ")}`);
   }
-  if (state.applyProgress !== undefined) {
-    if (!isPlainObject(state.applyProgress)) throw new Error("Invalid apply progress");
-    for (const progress of Object.values(state.applyProgress)) {
-      if (!isPlainObject(progress) || !["running", "done", "skipped", "uncertain"].includes(progress.status)) {
-        throw new Error("Invalid apply progress entry");
-      }
-    }
+}
+
+function inspectProgress(state, planHash, scheduledActions) {
+  const stored = state.applyProgress;
+  if (stored === undefined || isPlainObject(stored) && Object.keys(stored).length === 0) {
+    return { entries: {}, needsBinding: true, hasUncertain: false };
   }
+  if (!isPlainObject(stored)) throw new Error("Invalid apply progress");
+  if (!Object.hasOwn(stored, "planHash") || !Object.hasOwn(stored, "entries")) {
+    throw new Error("Non-empty apply progress is not bound to a plan hash");
+  }
+  if (Object.keys(stored).some((key) => key !== "planHash" && key !== "entries")
+    || typeof stored.planHash !== "string" || !approvalPattern.test(stored.planHash)
+    || !isPlainObject(stored.entries)) {
+    throw new Error("Malformed apply progress");
+  }
+  if (stored.planHash !== planHash) throw new Error("Apply progress plan hash does not match the approved plan");
+
+  const allowedKeys = new Set(scheduledActions.map(actionKey));
+  let hasUncertain = false;
+  for (const [key, entry] of Object.entries(stored.entries)) {
+    if (!allowedKeys.has(key)) throw new Error(`Unknown or orphaned apply progress key: ${key}`);
+    if (!isPlainObject(entry) || Object.keys(entry).length !== 1 || !progressStatuses.has(entry.status)) {
+      throw new Error("Invalid apply progress entry");
+    }
+    if (entry.status === "running" || entry.status === "uncertain") hasUncertain = true;
+  }
+  return { entries: stored.entries, needsBinding: false, hasUncertain };
 }
 
 function validateFlags(plan, config) {
@@ -73,7 +97,9 @@ function validateApplyRequest({ plan, state, approvalHash, config, mode, phases 
   if (!["pilot", "resume"].includes(mode)) throw new Error("Apply mode must be pilot or resume");
   validateState(state, phases || (mode === "pilot" ? ["PILOT"] : ["APPLY"]));
   validateFlags(plan, config);
-  return calculated;
+  const scheduledActions = actionsFor(plan);
+  const progress = inspectProgress(state, calculated, scheduledActions);
+  return { planHash: calculated, scheduledActions, progress };
 }
 
 function stateSaver(paths, supplied) {
@@ -87,12 +113,13 @@ function resultCounts() {
 }
 
 function updateCounts(state, result) {
+  const entries = state.applyProgress?.entries || {};
   state.counts = {
-    pending: Object.values(state.applyProgress || {}).filter((entry) => entry.status === "running").length,
-    completed: Object.values(state.applyProgress || {}).filter((entry) => entry.status === "done").length,
+    pending: Object.values(entries).filter((entry) => entry.status === "running").length,
+    completed: Object.values(entries).filter((entry) => entry.status === "done").length,
     failed: result.failed,
-    skipped: Object.values(state.applyProgress || {}).filter((entry) => entry.status === "skipped").length,
-    uncertain: Object.values(state.applyProgress || {}).filter((entry) => entry.status === "uncertain").length,
+    skipped: Object.values(entries).filter((entry) => entry.status === "skipped").length,
+    uncertain: Object.values(entries).filter((entry) => entry.status === "uncertain").length,
   };
 }
 
@@ -126,47 +153,42 @@ function auditEvent(state, mode, action, key, status, stoppedReason) {
   return event;
 }
 
-async function runApply({ plan, state, adapter, approvalHash, config, mode, maxActions = Infinity,
+async function runApply({ plan, state, adapter, approvalHash, config, mode, maxActions,
   paths, appendAudit = async () => {}, saveState } = {}) {
-  validateApplyRequest({ plan, state, approvalHash, config, mode });
+  const validation = validateApplyRequest({ plan, state, approvalHash, config, mode });
   if (!adapter || typeof adapter.getAccountFingerprint !== "function") throw new Error("A ChatGPT adapter is required");
-  if (!(maxActions === Infinity || Number.isSafeInteger(maxActions) && maxActions > 0)) {
-    throw new Error("maxActions must be a positive integer");
+  const requestedLimit = maxActions === undefined ? DEFAULT_RESUME_MAX_ACTIONS : maxActions;
+  if (!Number.isSafeInteger(requestedLimit) || requestedLimit <= 0) {
+    throw new Error("maxActions must be a positive safe integer");
   }
-  const actualFingerprint = await adapter.getAccountFingerprint();
-  if (actualFingerprint !== state.accountFingerprint) throw new Error("Account fingerprint mismatch; zero actions performed");
-
   const result = resultCounts();
-  const persist = stateSaver(paths, saveState);
-  const limit = mode === "pilot" ? Math.min(maxActions, 5) : maxActions;
-  let attempts = 0;
-  state.applyProgress ||= {};
-  const scheduledActions = actionsFor(plan);
-  if (scheduledActions.some((action) => {
-    const status = state.applyProgress[actionKey(action)]?.status;
-    return status === "running" || status === "uncertain";
-  })) {
+  if (validation.progress.hasUncertain) {
     result.uncertain = 1;
     result.stoppedReason = "uncertain";
     return result;
   }
+  const actualFingerprint = await adapter.getAccountFingerprint();
+  if (actualFingerprint !== state.accountFingerprint) throw new Error("Account fingerprint mismatch; zero actions performed");
 
-  for (const action of scheduledActions) {
+  const persist = stateSaver(paths, saveState);
+  const limit = mode === "pilot" ? Math.min(requestedLimit, 5) : requestedLimit;
+  let attempts = 0;
+  if (validation.progress.needsBinding) {
+    state.applyProgress = { planHash: validation.planHash, entries: {} };
+  }
+  const entries = state.applyProgress.entries;
+
+  for (const action of validation.scheduledActions) {
     const key = actionKey(action);
-    const progress = state.applyProgress[key];
+    const progress = entries[key];
     if (action.action === "keep" || action.planStatus === "done" || progress?.status === "done" || progress?.status === "skipped") {
       result.skipped++;
-      if (!progress && action.action === "keep") state.applyProgress[key] = { status: "skipped" };
+      if (!progress && action.action === "keep") entries[key] = { status: "skipped" };
       continue;
-    }
-    if (progress?.status === "running" || progress?.status === "uncertain") {
-      result.uncertain++;
-      result.stoppedReason = "uncertain";
-      return result;
     }
     if (attempts >= limit) break;
 
-    state.applyProgress[key] = { status: "running" };
+    entries[key] = { status: "running" };
     updateCounts(state, result);
     persist(state);
     await appendAudit(auditEvent(state, mode, action, key, "running"));
@@ -181,7 +203,7 @@ async function runApply({ plan, state, adapter, approvalHash, config, mode, maxA
     const status = operationResult?.status;
     if (status !== "verified") {
       const stoppedReason = stopStatuses.has(status) ? status : "browser_interrupted";
-      state.applyProgress[key] = { status: "uncertain" };
+      entries[key] = { status: "uncertain" };
       result.uncertain++;
       result.stoppedReason = stoppedReason;
       updateCounts(state, result);
@@ -190,7 +212,7 @@ async function runApply({ plan, state, adapter, approvalHash, config, mode, maxA
       return result;
     }
 
-    state.applyProgress[key] = { status: "done" };
+    entries[key] = { status: "done" };
     result.completed++;
     updateCounts(state, result);
     persist(state);
@@ -200,4 +222,4 @@ async function runApply({ plan, state, adapter, approvalHash, config, mode, maxA
   return result;
 }
 
-module.exports = { runApply, validateApplyRequest, actionKey };
+module.exports = { DEFAULT_RESUME_MAX_ACTIONS, runApply, validateApplyRequest, actionKey };

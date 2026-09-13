@@ -1,7 +1,7 @@
 const fs = require("node:fs");
 const path = require("node:path");
 const { appendAudit } = require("../core/audit");
-const { runApply, validateApplyRequest } = require("../core/apply-engine");
+const { DEFAULT_RESUME_MAX_ACTIONS, runApply, validateApplyRequest } = require("../core/apply-engine");
 const { loadConfig } = require("../core/config");
 const { createPaths } = require("../core/paths");
 const { loadRunState, saveRunState, transitionState } = require("../core/state");
@@ -58,7 +58,10 @@ async function run(argv = [], deps = {}) {
   const state = loadRunState(paths);
   const config = effectiveConfig(rootDir, deps);
   const prePhase = mode === "pilot" ? "PLAN_REVIEW" : "APPLY_APPROVAL";
-  validateApplyRequest({ plan: approvedPlan, state, approvalHash, config, mode, phases: [prePhase] });
+  const validation = validateApplyRequest({ plan: approvedPlan, state, approvalHash, config, mode, phases: [prePhase] });
+  if (validation.progress.hasUncertain) {
+    throw new Error("Apply progress contains a running or uncertain action; manual review is required");
+  }
   if (mode === "resume") requireVerifiedPilot(state, approvedPlan.planHash);
 
   const persist = deps.saveState || saveRunState;
@@ -94,7 +97,7 @@ async function run(argv = [], deps = {}) {
       approvalHash,
       config,
       mode,
-      maxActions: deps.maxActions ?? Infinity,
+      maxActions: deps.maxActions === undefined ? DEFAULT_RESUME_MAX_ACTIONS : deps.maxActions,
       paths,
       saveState: persist,
       appendAudit: (event) => deps.appendAudit ? deps.appendAudit(paths, event) : appendAudit(paths, event),

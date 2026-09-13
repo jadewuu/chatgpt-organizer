@@ -5,7 +5,7 @@ const os = require("node:os");
 const path = require("node:path");
 
 const { appendAudit } = require("../src/core/audit");
-const { runApply } = require("../src/core/apply-engine");
+const { DEFAULT_RESUME_MAX_ACTIONS, actionKey, runApply } = require("../src/core/apply-engine");
 const { run: runCommand } = require("../src/commands/apply");
 const { createPaths } = require("../src/core/paths");
 const { hashPlan } = require("../src/core/planner");
@@ -49,6 +49,10 @@ function state(phase = "PILOT", changes = {}) {
   return { runId: "run-fixture", accountFingerprint: "account-fixture", phase, ...changes };
 }
 
+function progress(approvedPlan, entries = {}) {
+  return { planHash: approvedPlan.planHash, entries };
+}
+
 function temporaryPaths(t) {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "chatgpt-organizer-apply-"));
   t.after(() => fs.rmSync(root, { recursive: true, force: true }));
@@ -75,6 +79,121 @@ test("pilot caps write attempts at five", async () => {
   const result = await apply({ plan: plan(Array.from({ length: 7 }, (_, index) => item(index))), adapter });
   assert.equal(result.completed, 5);
   assert.equal(adapter.actions.length, 5);
+});
+
+test("resume defaults to a production batch of 25 and supplied limits must be positive safe integers", async () => {
+  assert.equal(DEFAULT_RESUME_MAX_ACTIONS, 25);
+  const approvedPlan = plan(Array.from({ length: 30 }, (_, index) => item(index)));
+  const adapter = new FakeChatGPTAdapter();
+  const result = await runApply({
+    plan: approvedPlan,
+    state: state("APPLY"),
+    adapter,
+    approvalHash: approvedPlan.planHash,
+    config: enabled,
+    mode: "resume",
+    appendAudit: async () => {},
+  });
+  assert.equal(result.completed, 25);
+  assert.equal(adapter.actions.length, 25);
+
+  for (const invalid of [Infinity, 0, -1, 1.5, Number.MAX_SAFE_INTEGER + 1]) {
+    const guardedAdapter = new FakeChatGPTAdapter();
+    let fingerprintReads = 0;
+    guardedAdapter.getAccountFingerprint = async () => { fingerprintReads++; return "account-fixture"; };
+    await assert.rejects(runApply({
+      plan: approvedPlan,
+      state: state("APPLY"),
+      adapter: guardedAdapter,
+      approvalHash: approvedPlan.planHash,
+      config: enabled,
+      mode: "resume",
+      maxActions: invalid,
+      appendAudit: async () => {},
+    }), /maxActions.*positive.*safe integer/i);
+    assert.equal(fingerprintReads, 0);
+    assert.equal(guardedAdapter.actions.length, 0);
+  }
+});
+
+test("progress keys bind every write to its complete approved identity", () => {
+  const base = { kind: "conversation", action: "move", conversationId: "fixture-0" };
+  assert.notEqual(
+    actionKey({ ...base, projectName: "Work" }),
+    actionKey({ ...base, projectName: "Personal" }),
+  );
+  assert.equal(
+    actionKey({ ...base, projectName: "Work" }),
+    JSON.stringify(["conversation", "move", "fixture-0", "Work"]),
+  );
+  assert.equal(
+    actionKey({ kind: "project", action: "createProject", projectName: "Work" }),
+    JSON.stringify(["project", "create", "Work"]),
+  );
+  assert.equal(
+    actionKey({ kind: "conversation", action: "archive", conversationId: "fixture-0" }),
+    JSON.stringify(["conversation", "archive", "fixture-0"]),
+  );
+});
+
+test("engine rejects unbound, mismatched, malformed, and orphaned progress before adapter use", async () => {
+  const approvedPlan = plan([item(0)]);
+  const validKey = actionKey({
+    kind: "conversation", action: "move", conversationId: "fixture-0", projectName: "Work",
+  });
+  const orphanKey = actionKey({
+    kind: "conversation", action: "archive", conversationId: "old-fixture", projectName: null,
+  });
+  const oldDestinationKey = actionKey({
+    kind: "conversation", action: "move", conversationId: "fixture-0", projectName: "Old Project",
+  });
+  const cases = [
+    { [validKey]: { status: "done" } },
+    { planHash: "0".repeat(64), entries: { [validKey]: { status: "done" } } },
+    { planHash: approvedPlan.planHash, entries: [] },
+    { planHash: approvedPlan.planHash, entries: { [oldDestinationKey]: { status: "done" } } },
+    { planHash: approvedPlan.planHash, entries: { [orphanKey]: { status: "running" } } },
+  ];
+  for (const applyProgress of cases) {
+    const adapter = new FakeChatGPTAdapter();
+    let fingerprintReads = 0;
+    adapter.getAccountFingerprint = async () => { fingerprintReads++; return "account-fixture"; };
+    await assert.rejects(runApply({
+      plan: approvedPlan,
+      state: state("APPLY", { applyProgress }),
+      adapter,
+      approvalHash: approvedPlan.planHash,
+      config: enabled,
+      mode: "resume",
+      appendAudit: async () => {},
+    }), /progress|plan hash|orphan|unknown/i);
+    assert.equal(fingerprintReads, 0);
+    assert.equal(adapter.actions.length, 0);
+  }
+});
+
+test("engine stops on any bound running or uncertain entry before adapter use", async () => {
+  const approvedPlan = plan([item(0), item(1)]);
+  for (const prior of ["running", "uncertain"]) {
+    const interruptedKey = actionKey({
+      kind: "conversation", action: "move", conversationId: "fixture-1", projectName: "Work",
+    });
+    const adapter = new FakeChatGPTAdapter();
+    let fingerprintReads = 0;
+    adapter.getAccountFingerprint = async () => { fingerprintReads++; return "account-fixture"; };
+    const result = await runApply({
+      plan: approvedPlan,
+      state: state("APPLY", { applyProgress: progress(approvedPlan, { [interruptedKey]: { status: prior } }) }),
+      adapter,
+      approvalHash: approvedPlan.planHash,
+      config: enabled,
+      mode: "resume",
+      appendAudit: async () => {},
+    });
+    assert.equal(result.stoppedReason, "uncertain");
+    assert.equal(fingerprintReads, 0);
+    assert.equal(adapter.actions.length, 0);
+  }
 });
 
 test("required Project creation counts toward the cap and runs before moves and archives", async () => {
@@ -125,7 +244,7 @@ test("all safety-stop results stop immediately without retry", async () => {
     assert.equal(result.stoppedReason, status);
     assert.equal(result.uncertain, 1);
     assert.equal(adapter.actions.length, 1, status);
-    assert.equal(Object.values(runState.applyProgress)[0].status, "uncertain");
+    assert.equal(Object.values(runState.applyProgress.entries)[0].status, "uncertain");
   }
 });
 
@@ -145,8 +264,8 @@ test("resume skips persisted done, keep, and plan-done items", async () => {
     item(2, { status: "done" }),
     item(3),
   ]);
-  const firstKey = JSON.stringify(["conversation", "move", "fixture-0"]);
-  const runState = state("APPLY", { applyProgress: { [firstKey]: { status: "done" } } });
+  const firstKey = JSON.stringify(["conversation", "move", "fixture-0", "Work"]);
+  const runState = state("APPLY", { applyProgress: progress(approvedPlan, { [firstKey]: { status: "done" } }) });
   const result = await apply({ plan: approvedPlan, adapter, state: runState, mode: "resume" });
   assert.equal(result.completed, 1);
   assert.equal(result.skipped, 3);
@@ -156,9 +275,10 @@ test("resume skips persisted done, keep, and plan-done items", async () => {
 test("resume stops instead of repeating a previously running or uncertain action", async () => {
   for (const prior of ["running", "uncertain"]) {
     const adapter = new FakeChatGPTAdapter();
-    const key = JSON.stringify(["conversation", "move", "fixture-0"]);
-    const runState = state("APPLY", { applyProgress: { [key]: { status: prior } } });
-    const result = await apply({ plan: plan([item(0)]), adapter, state: runState, mode: "resume" });
+    const approvedPlan = plan([item(0)]);
+    const key = JSON.stringify(["conversation", "move", "fixture-0", "Work"]);
+    const runState = state("APPLY", { applyProgress: progress(approvedPlan, { [key]: { status: prior } }) });
+    const result = await apply({ plan: approvedPlan, adapter, state: runState, mode: "resume" });
     assert.equal(result.stoppedReason, "uncertain");
     assert.equal(adapter.actions.length, 0);
   }
@@ -166,12 +286,12 @@ test("resume stops instead of repeating a previously running or uncertain action
 
 test("resume detects any interrupted action before starting an earlier pending action", async () => {
   const adapter = new FakeChatGPTAdapter();
-  const interruptedKey = JSON.stringify(["conversation", "archive", "fixture-1"]);
-  const runState = state("APPLY", { applyProgress: { [interruptedKey]: { status: "running" } } });
   const approvedPlan = plan([
     item(0),
     item(1, { action: "archive", suggestedAction: "archive", project: null, archiveReason: "Synthetic" }),
   ]);
+  const interruptedKey = JSON.stringify(["conversation", "archive", "fixture-1"]);
+  const runState = state("APPLY", { applyProgress: progress(approvedPlan, { [interruptedKey]: { status: "running" } }) });
   const result = await apply({ plan: approvedPlan, adapter, state: runState, mode: "resume" });
   assert.equal(result.stoppedReason, "uncertain");
   assert.equal(adapter.actions.length, 0);
@@ -187,7 +307,8 @@ test("state is persisted running before an attempt and done only after verificat
     config: enabled, mode: "pilot", paths, appendAudit: async () => {},
     saveState: (_paths, value) => snapshots.push(JSON.parse(JSON.stringify(value))),
   });
-  assert.deepEqual(snapshots.map((snapshot) => Object.values(snapshot.applyProgress)[0].status), ["running", "done"]);
+  assert.deepEqual(snapshots.map((snapshot) => Object.values(snapshot.applyProgress.entries)[0].status), ["running", "done"]);
+  assert.ok(snapshots.every((snapshot) => snapshot.applyProgress.planHash === plan([item(0)]).planHash));
 });
 
 test("apply never mutates the approved plan", async () => {
@@ -204,7 +325,7 @@ test("browser interruption is persisted as uncertain without retry", async () =>
   const result = await apply({ plan: plan([item(0), item(1)]), adapter, state: runState });
   assert.equal(result.stoppedReason, "browser_interrupted");
   assert.equal(adapter.actions.length, 1);
-  assert.equal(Object.values(runState.applyProgress)[0].status, "uncertain");
+  assert.equal(Object.values(runState.applyProgress.entries)[0].status, "uncertain");
 });
 
 test("appendAudit writes private flushed JSONL, redacts forbidden data, and refuses symlinks", (t) => {
@@ -267,6 +388,60 @@ test("apply command rejects malformed approval and disabled flags before constru
     }), /approve|hash|disabled|allow/i);
     assert.equal(constructions, 0, scenario);
   }
+});
+
+test("apply command rejects unsafe persisted progress before constructing an adapter", async (t) => {
+  const approvedPlan = plan([item(0)]);
+  const validKey = actionKey({
+    kind: "conversation", action: "move", conversationId: "fixture-0", projectName: "Work",
+  });
+  const orphanKey = actionKey({
+    kind: "conversation", action: "archive", conversationId: "old-fixture", projectName: null,
+  });
+  const cases = [
+    { [validKey]: { status: "done" } },
+    { planHash: "0".repeat(64), entries: { [validKey]: { status: "done" } } },
+    { planHash: approvedPlan.planHash, entries: { [orphanKey]: { status: "running" } } },
+    { planHash: approvedPlan.planHash, entries: { [validKey]: { status: "uncertain" } } },
+  ];
+  for (const applyProgress of cases) {
+    const fixture = writeCommandFixture(t, {
+      approvedPlan,
+      runState: state("APPLY_APPROVAL", {
+        applyProgress,
+        pilotVerification: { status: "verified", planHash: approvedPlan.planHash },
+      }),
+    });
+    let constructions = 0;
+    await assert.rejects(runCommand(["--mode", "resume", "--approve", approvedPlan.planHash], {
+      paths: fixture.paths,
+      rootDir: fixture.paths.root,
+      config: enabled,
+      createAdapter() { constructions++; return new FakeChatGPTAdapter(); },
+    }), /progress|plan hash|orphan|unknown|uncertain/i);
+    assert.equal(constructions, 0);
+  }
+});
+
+test("resume command uses the 25-action production default", async (t) => {
+  const approvedPlan = plan(Array.from({ length: 30 }, (_, index) => item(index)));
+  const fixture = writeCommandFixture(t, {
+    approvedPlan,
+    runState: state("APPLY_APPROVAL", {
+      pilotVerification: { status: "verified", planHash: approvedPlan.planHash },
+    }),
+  });
+  const adapter = new FakeChatGPTAdapter();
+  const code = await runCommand(["--mode", "resume", "--approve", approvedPlan.planHash], {
+    paths: fixture.paths,
+    rootDir: fixture.paths.root,
+    config: enabled,
+    createAdapter: () => adapter,
+    appendAudit: async () => {},
+    stdout: { write() {} },
+  });
+  assert.equal(code, 0);
+  assert.equal(adapter.actions.length, 25);
 });
 
 test("pilot command records approval and persists PLAN_REVIEW through PILOT_APPROVAL to PILOT", async (t) => {
