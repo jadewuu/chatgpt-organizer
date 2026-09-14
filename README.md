@@ -74,7 +74,21 @@ The agent guides this sequence and uses only repository commands:
 2. **Read-only discovery.** Run `pnpm organizer discover`, then `pnpm organizer plan`. Have the agent show representative conversation-title samples and estimated counts for every proposed Project; then review `.local/plans/taxonomy.yaml` and explicitly approve or customize it.
 3. **Classification.** Run `pnpm organizer plan` again to produce `.local/plans/classification-input.jsonl`. Your Codex or Claude Code session processes it in bounded batches and writes schema-valid `.local/plans/classifications.json`. Additional excerpts require your explicit full-content permission and are limited to low-confidence items.
 4. **Read-only plan review.** Run `pnpm organizer plan` to generate `.local/plans/migration-plan.json` and `.local/reports/review.html`. Review the taxonomy, every proposed action, unresolved items, and the displayed plan hash. A classification is never write authorization.
-5. **Explicit five-write pilot.** After approving the exact unchanged hash, run:
+5. **Configure only reviewed write capabilities.** The example deliberately disables every write action. If the local config does not exist, copy it once:
+
+   ```bash
+   cp config/organizer.example.yaml config/organizer.yaml
+   ```
+
+   `config/organizer.yaml` is Git-ignored. Enable only the action flags required by the reviewed plan.
+
+   - Set `allowCreateProjects: true` only when the plan contains a Project with `createRequired: true`.
+   - Set `allowMove: true` only when the plan contains a conversation with `action: "move"`.
+   - Set `allowArchive: true` only when the plan contains a conversation with `action: "archive"`.
+   - Keep every unused action flag `false` and keep `neverDelete: true`.
+
+   These flags are capability gates, not write approval, and they do not replace explicit approval of the exact unchanged plan hash.
+6. **Explicit five-write pilot.** After approving the exact unchanged hash, run:
 
    ```bash
    organizer_plan_hash="$(node -p 'require("./.local/plans/migration-plan.json").planHash')"
@@ -82,7 +96,7 @@ The agent guides this sequence and uses only repository commands:
    pnpm organizer verify
    ```
 
-6. **Separate bounded resume.** Review the verified pilot. Only after a new explicit approval, resume the unchanged plan in the production batch limit (25 actions per invocation), then verify:
+7. **Separate bounded resume.** Review the verified pilot. Only after a new explicit approval, resume the unchanged plan in the production batch limit (25 actions per invocation), then verify:
 
    ```bash
    pnpm organizer apply --mode resume --approve "$organizer_plan_hash"
@@ -90,7 +104,7 @@ The agent guides this sequence and uses only repository commands:
    ```
 
    Repeat only after reviewing results. Previously verified actions are not repeated. Any uncertain result stops the batch.
-7. **Optional local cleanup.** After you no longer need the extracted data, run `pnpm organizer clean:data`. It prints every absolute target and requires the exact run ID. It preserves `.local/state` and the browser profile. To also remove the dedicated profile, run `pnpm organizer clean:data --include-profile` and complete the separate warning confirmation; you will need to log in again.
+8. **Optional local cleanup.** After you no longer need the extracted data, run `pnpm organizer clean:data`. It prints every absolute target and requires the exact run ID. It preserves `.local/state` and the browser profile. To also remove the dedicated profile, run `pnpm organizer clean:data --include-profile` and complete the separate warning confirmation; you will need to log in again.
 
 ## Local data map
 

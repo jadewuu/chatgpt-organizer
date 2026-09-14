@@ -97,3 +97,25 @@ test("agent entry points share one exact safety and ownership contract", () => {
   assert.doesNotMatch(agents, /Claude Web history support is available/i);
   assert.doesNotMatch(safety, /Claude Web history support is available/i);
 });
+
+test("public stranger flow enables only reviewed action capabilities in ignored config", () => {
+  const readme = read("README.md");
+  const agents = read("AGENTS.md");
+  const skill = read(".agents/skills/chatgpt-organizer/SKILL.md");
+  const ignored = read(".gitignore").split(/\r?\n/).map((line) => line.trim());
+  const copyCommand = "cp config/organizer.example.yaml config/organizer.yaml";
+  const scopeRule = "Enable only the action flags required by the reviewed plan.";
+  const approvalRule = "These flags are capability gates, not write approval, and they do not replace explicit approval of the exact unchanged plan hash.";
+
+  assert.ok(ignored.includes("config/organizer.yaml"), "local action config must be Git-ignored");
+  for (const document of [readme, skill]) {
+    assert.ok(document.includes(copyCommand), "missing local config copy command");
+    assert.ok(document.includes(scopeRule), "missing reviewed-action flag scope");
+    assert.ok(document.includes(approvalRule), "missing distinction between capability flags and approval");
+    for (const flag of ["allowCreateProjects", "allowMove", "allowArchive", "neverDelete: true"]) {
+      assert.ok(document.includes(flag), `missing action config field: ${flag}`);
+    }
+  }
+  assert.ok(agents.includes(`- ${scopeRule}`));
+  assert.ok(agents.includes(`- ${approvalRule}`));
+});

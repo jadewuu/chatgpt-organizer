@@ -14,3 +14,5 @@
 - Approve the pilot only by passing the exact unchanged plan hash to `pnpm organizer apply --mode pilot --approve <plan-hash>`.
 - After pilot verification, obtain separate approval before `pnpm organizer apply --mode resume --approve <plan-hash>`; every resume is bounded and stops on uncertainty.
 - Normal `pnpm organizer clean:data` preserves `.local/state` and `.local/profile`; `--include-profile` requires a separate confirmation and a new login afterward.
+- Enable only the action flags required by the reviewed plan.
+- These flags are capability gates, not write approval, and they do not replace explicit approval of the exact unchanged plan hash.

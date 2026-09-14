@@ -25,3 +25,13 @@ Approve the pilot only by passing the exact unchanged plan hash to `pnpm organiz
 After pilot verification, obtain separate approval before `pnpm organizer apply --mode resume --approve <plan-hash>`; every resume is bounded and stops on uncertainty.
 
 Normal `pnpm organizer clean:data` preserves `.local/state` and `.local/profile`; `--include-profile` requires a separate confirmation and a new login afterward.
+
+Before any approved write, if `config/organizer.yaml` does not exist, create the Git-ignored local config once:
+
+```bash
+cp config/organizer.example.yaml config/organizer.yaml
+```
+
+Enable only the action flags required by the reviewed plan. Set `allowCreateProjects` only for planned Project creation, `allowMove` only for planned moves, and `allowArchive` only for planned archives. Leave unused flags `false` and keep `neverDelete: true`.
+
+These flags are capability gates, not write approval, and they do not replace explicit approval of the exact unchanged plan hash.

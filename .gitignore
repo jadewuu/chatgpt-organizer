@@ -1,4 +1,5 @@
 .local/
+config/organizer.yaml
 data/
 profile/
 chrome-profile/
