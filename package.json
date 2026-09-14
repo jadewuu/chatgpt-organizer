@@ -9,7 +9,8 @@
     "login": "node scripts/02-login.js",
     "discover": "node scripts/01-discover.js",
     "test": "node --test",
-    "privacy:audit": "node scripts/privacy-audit.js"
+    "privacy:audit": "node scripts/privacy-audit.js",
+    "check": "pnpm test && pnpm privacy:audit"
   },
   "dependencies": {
     "ajv": "^8.20.0",

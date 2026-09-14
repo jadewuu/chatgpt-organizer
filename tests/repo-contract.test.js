@@ -26,6 +26,12 @@ const stages = [
   "8. Run `pnpm organizer verify` and offer `pnpm organizer clean:data`.",
 ];
 
+const releaseWorkflowClauses = [
+  "Approve the pilot only by passing the exact unchanged plan hash to `pnpm organizer apply --mode pilot --approve <plan-hash>`.",
+  "After pilot verification, obtain separate approval before `pnpm organizer apply --mode resume --approve <plan-hash>`; every resume is bounded and stops on uncertainty.",
+  "Normal `pnpm organizer clean:data` preserves `.local/state` and `.local/profile`; `--include-profile` requires a separate confirmation and a new login afterward.",
+];
+
 const workflowRows = [
   "| `PREFLIGHT` | `pnpm organizer doctor` | Environment and private-data safety report | None; this command is read-only. |",
   "| `AUTHENTICATE` | `pnpm organizer login`, only when authentication is required | Dedicated-profile session and account fingerprint in `.local/state/run.json` | Manual user authentication only; it is not approval to write. |",
@@ -61,6 +67,10 @@ test("agent entry points share one exact safety and ownership contract", () => {
   assert.ok(codexSkill.includes("Read `AGENTS.md`, `docs/workflow.md`, and `docs/safety.md` before operating on a user's account."));
   for (const [index, stage] of stages.entries()) {
     assert.ok(codexSkill.includes(stage), `missing or changed skill stage ${index + 1}`);
+  }
+  for (const clause of releaseWorkflowClauses) {
+    assert.ok(agents.includes(`- ${clause}`), `missing AGENTS release workflow clause: ${clause}`);
+    assert.ok(codexSkill.includes(clause), `missing skill release workflow clause: ${clause}`);
   }
   assert.deepEqual(
     [...codexSkill.matchAll(/^(\d+)\. /gm)].map((match) => Number(match[1])),
