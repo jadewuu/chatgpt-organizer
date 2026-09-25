@@ -50,6 +50,8 @@ function detailMessages(data, id) {
     if (!node) return null;
     const message = node.message;
     if (message && ["user", "assistant"].includes(message.author?.role)) {
+      if (message.status !== "finished_successfully"
+        || (message.author.role === "assistant" && message.end_turn !== true)) return null;
       if (message.content?.content_type !== "text" || !Array.isArray(message.content.parts)
         || !message.content.parts.every((part) => typeof part === "string")) return null;
       const text = message.content.parts.join("").trim();

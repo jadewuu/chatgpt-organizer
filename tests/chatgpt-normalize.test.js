@@ -1,7 +1,7 @@
 const test = require("node:test");
 const assert = require("node:assert/strict");
 const fixtures = require("./fixtures/conversations.json");
-const { normalizeApiConversation, mergeConversations, isCompleteConversationRecord } = require("../src/providers/chatgpt/normalize");
+const { normalizeApiConversation, mergeConversations, isCompleteConversationRecord, detailMessages } = require("../src/providers/chatgpt/normalize");
 
 test("normalizes ChatGPT list items without message content", () => {
   assert.deepEqual(normalizeApiConversation({ ...fixtures[0], messages: ["synthetic secret"] }), {
@@ -41,4 +41,42 @@ test("only nonempty usable conversation records at their exact provider URL are 
     assert.equal(isCompleteConversationRecord(invalid, "fixture-chat-1"), false);
   }
   assert.equal(isCompleteConversationRecord(record, "fixture-chat"), false);
+});
+
+test("completed native branches normalize only user and assistant text", () => {
+  const userOnly = { conversation_id: "fixture-chat", current_node: "user", mapping: {
+    user: { parent: null, message: { author: { role: "user" }, status: "finished_successfully",
+      content: { content_type: "text", parts: ["Synthetic question"] } } },
+  } };
+  assert.deepEqual(detailMessages(userOnly, "fixture-chat"), [{ role: "user", text: "Synthetic question" }]);
+
+  const userAndAssistant = { conversation_id: "fixture-chat", current_node: "assistant", mapping: {
+    user: { parent: null, message: { author: { role: "user" }, status: "finished_successfully",
+      content: { content_type: "text", parts: ["Synthetic question"] } } },
+    assistant: { parent: "user", message: { author: { role: "assistant" }, status: "finished_successfully", end_turn: true,
+      content: { content_type: "text", parts: ["Synthetic answer"] } } },
+  } };
+  assert.deepEqual(detailMessages(userAndAssistant, "fixture-chat"), [
+    { role: "user", text: "Synthetic question" }, { role: "assistant", text: "Synthetic answer" },
+  ]);
+});
+
+test("unfinished or unknown native branch metadata rejects extraction", () => {
+  const user = { author: { role: "user" }, status: "finished_successfully",
+    content: { content_type: "text", parts: ["Synthetic question"] } };
+  const assistant = { author: { role: "assistant" }, status: "finished_successfully", end_turn: true,
+    content: { content_type: "text", parts: ["Synthetic answer"] } };
+  for (const [name, changedUser, changedAssistant] of [
+    ["assistant still generating", user, { ...assistant, status: "in_progress", end_turn: false }],
+    ["assistant has not ended", user, { ...assistant, end_turn: false }],
+    ["assistant end_turn missing", user, { ...assistant, end_turn: undefined }],
+    ["assistant end_turn is not boolean", user, { ...assistant, end_turn: "true" }],
+    ["user status missing", { ...user, status: undefined }, assistant],
+    ["assistant status unknown", user, { ...assistant, status: "unknown" }],
+  ]) {
+    const payload = { conversation_id: "fixture-chat", current_node: "assistant", mapping: {
+      user: { parent: null, message: changedUser }, assistant: { parent: "user", message: changedAssistant },
+    } };
+    assert.equal(detailMessages(payload, "fixture-chat"), null, name);
+  }
 });

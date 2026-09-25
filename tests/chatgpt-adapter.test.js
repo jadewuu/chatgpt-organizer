@@ -16,6 +16,7 @@ const fixtures = require("./fixtures/conversations.json");
 
 function setup(t, { loggedIn = true, status = 200, accountId = "fixture-account", emitSession = true, emitList = true,
   workspaceMarkers = ["Synthetic workspace"], nativeIdentity = "synthetic-workspace-id", emitDetail = true,
+  detailJson = null,
   listJson = async () => ({ items: [...fixtures, { ...fixtures[0], title: "Synthetic latest", update_time: 1700000400 }] }) } = {}) {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "organizer-adapter-"));
   t.after(() => fs.rmSync(root, { recursive: true, force: true }));
@@ -69,8 +70,9 @@ function setup(t, { loggedIn = true, status = 200, accountId = "fixture-account"
       const request = { url: () => `https://chatgpt.com/backend-api/conversation/${id}` };
       page.emit("request", request);
       page.emit("response", { url: request.url, request: () => request, status: () => 200,
-        json: async () => ({ conversation_id: id, current_node: "m1", mapping: {
-          m1: { parent: null, message: { author: { role: "user" }, content: { content_type: "text", parts: ["Synthetic message"] } } },
+        json: async () => detailJson ? detailJson(id) : ({ conversation_id: id, current_node: "m1", mapping: {
+          m1: { parent: null, message: { author: { role: "user" }, status: "finished_successfully",
+            content: { content_type: "text", parts: ["Synthetic message"] } } },
         } }) });
     }
     return result === undefined ? undefined : JSON.parse(JSON.stringify(result));
@@ -784,6 +786,69 @@ test("read waits for delayed complete rendering and does not save a stable parti
       assert.equal(fs.existsSync(path.join(paths.raw, "conversations", "fixture-render.json")), false);
     }
   }
+});
+
+test("unfinished native message rejects stable partial DOM and never creates a reusable checkpoint", async (t) => {
+  const id = "fixture-native-in-progress";
+  const expectedMessages = [{ role: "user", text: "Synthetic question" }, { role: "assistant", text: "Partial answer" }];
+  const { adapter, paths, page, setMessages } = setup(t, { detailJson: (conversationId) => ({
+    conversation_id: conversationId, current_node: "assistant", mapping: {
+      user: { parent: null, message: { author: { role: "user" }, status: "finished_successfully",
+        content: { content_type: "text", parts: ["Synthetic question"] } } },
+      assistant: { parent: "user", message: { author: { role: "assistant" }, status: "in_progress", end_turn: false,
+        content: { content_type: "text", parts: ["Partial answer"] } } },
+    },
+  }) });
+  setMessages(expectedMessages.map(({ role, text }) => ({ getAttribute: () => role, querySelector: () => null, innerText: text })));
+  const evaluate = page.evaluate;
+  const snapshots = [];
+  let navigations = 0;
+  page.evaluate = async (fn, arg) => {
+    if (typeof arg === "string") navigations++;
+    const result = await evaluate(fn, arg);
+    if (result?.messages) snapshots.push(result);
+    return result;
+  };
+  for (let i = 0; i < 2; i++) {
+    await page.evaluate(({ selectors }) => ({
+      busy: !!document.querySelector('[aria-busy="true"], [data-is-streaming="true"]'),
+      messages: [...document.querySelectorAll(selectors.messageRoles)].map((node) => ({
+        role: node.getAttribute("data-message-author-role"), text: node.innerText.trim(),
+      })),
+    }), { selectors });
+  }
+  const target = path.join(paths.raw, "conversations", `${id}.json`);
+  await assert.rejects(adapter.readConversation(id), /incomplete|snapshot/i);
+  assert.ok(snapshots.length >= 2);
+  assert.ok(snapshots.every((snapshot) => snapshot.busy === false &&
+    JSON.stringify(snapshot.messages) === JSON.stringify(expectedMessages)));
+  assert.equal(fs.existsSync(target), false);
+  await assert.rejects(adapter.readConversation(id), /incomplete|snapshot/i);
+  assert.equal(navigations, 2);
+  assert.equal(fs.existsSync(target), false);
+});
+
+test("completed native branch extracts user and assistant and reuses its checkpoint", async (t) => {
+  const id = "fixture-native-complete";
+  const expectedMessages = [{ role: "user", text: "Synthetic question" }, { role: "assistant", text: "Complete answer" }];
+  const { adapter, paths, page, setMessages } = setup(t, { detailJson: (conversationId) => ({
+    conversation_id: conversationId, current_node: "assistant", mapping: {
+      user: { parent: null, message: { author: { role: "user" }, status: "finished_successfully",
+        content: { content_type: "text", parts: ["Synthetic question"] } } },
+      assistant: { parent: "user", message: { author: { role: "assistant" }, status: "finished_successfully", end_turn: true,
+        content: { content_type: "text", parts: ["Complete answer"] } } },
+    },
+  }) });
+  setMessages(expectedMessages.map(({ role, text }) => ({ getAttribute: () => role, querySelector: () => null, innerText: text })));
+  const record = await adapter.readConversation(id);
+  assert.deepEqual(record.messages, expectedMessages);
+  assert.deepEqual(JSON.parse(fs.readFileSync(path.join(paths.raw, "conversations", `${id}.json`))), record);
+  const evaluate = page.evaluate;
+  page.evaluate = async (fn, arg) => {
+    if (typeof arg === "string") throw new Error("Completed checkpoint must be reused");
+    return evaluate(fn, arg);
+  };
+  assert.deepEqual(await adapter.readConversation(id), record);
 });
 
 test("fresh discovery and read wrapper produce actual first-pass messages before classification", async (t) => {
