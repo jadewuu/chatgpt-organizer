@@ -18,10 +18,12 @@ The read-only plan explains each suggestion, its confidence, the current and pro
 
 | History provider | v0.1 status |
 | --- | --- |
-| ChatGPT Web history | Verified target on macOS with Google Chrome |
+| ChatGPT Web history | Only target; experimental v0.1 adapter on macOS with Google Chrome; authenticated acceptance pending |
 | Claude Web history | Unsupported and unverified |
 
 Codex and Claude Code are supported **agent runtimes**, not history providers. Their semantic AI capability belongs to your own account. This repository supplies deterministic local scripts; it has no maintainer API key, hosted backend, telemetry, or maintainer-operated data service.
+
+Earlier personal scripts were manually exercised by the author. That experience does not validate this new adapter. The native contract for a stable unique workspace ID has not been established, so this version deliberately stops account-bound reads and writes with a workspace-identity error. Synthetic tests exercise the intended workflow; authenticated discovery, extraction, selectors, and an explicitly approved five-write pilot remain required before a release tag or publication.
 
 ## Read-only by default
 
@@ -68,11 +70,11 @@ For Claude Code, paste:
 
 ## Plan, pilot, apply, verify, and clean up
 
-The agent guides this sequence and uses only repository commands:
+The following is the intended sequence after the workspace-identity contract passes authenticated acceptance. The current adapter stops at that gate; do not bypass it or treat extraction as complete:
 
 1. **Preflight and login.** Run `pnpm organizer doctor`. When authentication is needed, run `pnpm organizer login` and sign in manually in the dedicated Chrome profile. Do not copy another browser profile or its cookies.
 2. **Read-only discovery.** Run `pnpm organizer discover`, then `pnpm organizer plan`. Have the agent show representative conversation-title samples and estimated counts for every proposed Project; then review `.local/plans/taxonomy.yaml` and explicitly approve or customize it.
-3. **Classification.** Run `pnpm organizer plan` again to produce `.local/plans/classification-input.jsonl`. Your Codex or Claude Code session processes it in bounded batches and writes schema-valid `.local/plans/classifications.json`. Additional excerpts require your explicit full-content permission and are limited to low-confidence items.
+3. **Read-only extraction and classification.** Discovery contains metadata only. Run `node scripts/04-read.js --all` to extract messages into private `.local/raw/conversations/` checkpoints before running `pnpm organizer plan` again to produce `.local/plans/classification-input.jsonl`. This compatibility command is currently the read entry point. A missing or incomplete extraction blocks classification. Your Codex or Claude Code session processes the first/last-message input in bounded batches and writes schema-valid `.local/plans/classifications.json`. Additional excerpts require your explicit full-content permission and are limited to low-confidence items.
 4. **Read-only plan review.** Run `pnpm organizer plan` to generate `.local/plans/migration-plan.json` and `.local/reports/review.html`. Review the taxonomy, every proposed action, unresolved items, and the displayed plan hash. A classification is never write authorization.
 5. **Configure only reviewed write capabilities.** The example deliberately disables every write action. If the local config does not exist, copy it once:
 
@@ -103,7 +105,7 @@ The agent guides this sequence and uses only repository commands:
    pnpm organizer verify
    ```
 
-   Repeat only after reviewing results. Previously verified actions are not repeated. Any uncertain result stops the batch.
+   Each successful batch verification returns to `APPLY_APPROVAL` while actions remain. Review results and obtain fresh exact-hash approval for each subsequent invocation. The final verification alone marks `COMPLETE`. Previously verified actions are not repeated. Any uncertain result stops the batch.
 8. **Optional local cleanup.** After you no longer need the extracted data, run `pnpm organizer clean:data`. It prints every absolute target and requires the exact run ID. It preserves `.local/state` and the browser profile. To also remove the dedicated profile, run `pnpm organizer clean:data --include-profile` and complete the separate warning confirmation; you will need to log in again.
 
 ## Local data map

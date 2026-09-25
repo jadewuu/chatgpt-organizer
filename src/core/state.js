@@ -1,5 +1,6 @@
 const fs = require("node:fs");
 const path = require("node:path");
+const { writePrivateFile } = require("./private-file");
 
 const transitions = {
   PREFLIGHT: ["AUTHENTICATE"],
@@ -11,7 +12,7 @@ const transitions = {
   PILOT_APPROVAL: ["PILOT"],
   PILOT: ["APPLY_APPROVAL"],
   APPLY_APPROVAL: ["APPLY"],
-  APPLY: ["VERIFY"],
+  APPLY: ["VERIFY", "APPLY_APPROVAL"],
   VERIFY: ["COMPLETE"],
   COMPLETE: [],
 };
@@ -57,14 +58,7 @@ function loadRunState(paths) {
 }
 
 function saveRunState(paths, state) {
-  fs.mkdirSync(paths.state, { recursive: true, mode: 0o700 });
-  fs.chmodSync(paths.state, 0o700);
-  const target = runStatePath(paths);
-  const temporary = `${target}.tmp`;
-  fs.writeFileSync(temporary, `${JSON.stringify(state, null, 2)}\n`, { mode: 0o600 });
-  fs.chmodSync(temporary, 0o600);
-  fs.renameSync(temporary, target);
-  fs.chmodSync(target, 0o600);
+  writePrivateFile(paths, paths.state, runStatePath(paths), `${JSON.stringify(state, null, 2)}\n`);
   return state;
 }
 

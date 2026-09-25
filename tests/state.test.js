@@ -40,3 +40,22 @@ test("persists run state atomically with private permissions", (t) => {
   assert.equal(fs.statSync(paths.state).mode & 0o777, 0o700);
   assert.equal(fs.statSync(path.join(paths.state, "run.json")).mode & 0o777, 0o600);
 });
+
+test("state writes reject symlink directories and ignore planted legacy temporary files", (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "organizer-state-links-"));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const paths = createPaths(root);
+  fs.mkdirSync(paths.local);
+  const outside = path.join(root, "outside");
+  fs.mkdirSync(outside);
+  fs.symlinkSync(outside, paths.state);
+  assert.throws(() => saveRunState(paths, { phase: "PREFLIGHT" }), /symlink/);
+  assert.deepEqual(fs.readdirSync(outside), []);
+  fs.unlinkSync(paths.state);
+  fs.mkdirSync(paths.state);
+  const victim = path.join(outside, "victim");
+  fs.writeFileSync(victim, "unchanged");
+  fs.symlinkSync(victim, path.join(paths.state, "run.json.tmp"));
+  saveRunState(paths, { phase: "PREFLIGHT" });
+  assert.equal(fs.readFileSync(victim, "utf8"), "unchanged");
+});

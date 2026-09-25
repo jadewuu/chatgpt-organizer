@@ -32,10 +32,11 @@ test("normalization preserves project IDs and excludes entries without a usable 
 });
 
 test("only nonempty usable conversation records at their exact provider URL are complete", () => {
-  const record = { provider: "chatgpt", conversationId: "fixture-chat-1", url: "https://chatgpt.com/c/fixture-chat-1", messages: [{ role: "user", text: "Synthetic content" }] };
+  const record = { provider: "chatgpt", conversationId: "fixture-chat-1", url: "https://chatgpt.com/c/fixture-chat-1", extractionEvidence: { fullIdResponse: true, stableRender: true, complete: true }, messages: [{ role: "user", text: "Synthetic content" }] };
   assert.equal(isCompleteConversationRecord(record, "fixture-chat-1"), true);
   for (const invalid of [null, {}, { ...record, messages: [] }, { ...record, messages: [{ role: "", text: "Synthetic content" }] },
     { ...record, messages: [{ role: "user", text: "  " }] }, { ...record, messages: [{ role: "user", text: null }] },
+    { ...record, extractionEvidence: undefined }, { ...record, extractionEvidence: { fullIdResponse: false, stableRender: true, complete: true } },
     { ...record, url: "https://example.invalid/c/fixture-chat-1" }, { ...record, url: "https://chatgpt.com/c/fixture-other" }]) {
     assert.equal(isCompleteConversationRecord(invalid, "fixture-chat-1"), false);
   }

@@ -128,6 +128,10 @@ async function run(argv = [], deps = {}) {
   const rootDir = path.resolve(deps.rootDir || process.cwd());
   const paths = deps.paths || createPaths(rootDir);
   const state = requireRunState(paths);
+  if (!["DISCOVER", "TAXONOMY_REVIEW", "CLASSIFY", "PLAN_REVIEW"].includes(state.phase)
+    || state.applyProgress && Object.keys(state.applyProgress).length) {
+    throw new Error("Planning is blocked once writes may have begun; use the documented post-write recovery path");
+  }
   const plans = paths.plans;
   const taxonomyPath = path.join(plans, "taxonomy.yaml");
   const inputPath = path.join(plans, "classification-input.jsonl");
@@ -175,7 +179,7 @@ async function run(argv = [], deps = {}) {
     return 0;
   }
 
-  if (state.phase !== "CLASSIFY") {
+  if (!["CLASSIFY", "PLAN_REVIEW"].includes(state.phase)) {
     throw new Error(`Cannot build migration plan from phase ${state.phase}`);
   }
 
@@ -186,6 +190,7 @@ async function run(argv = [], deps = {}) {
   readClassificationInput(inputPath, conversations, { requireFirstPass: allowFullContent });
 
   if (allowFullContent) {
+    if (state.phase !== "CLASSIFY") throw new Error("Full-content review requires CLASSIFY phase");
     const input = buildClassificationInput(conversations, extracted, effectiveConfig, {
       allowFullContent: true,
       priorClassifications: classifications,
@@ -198,11 +203,15 @@ async function run(argv = [], deps = {}) {
   }
 
   const plan = buildMigrationPlan(conversations, classifications, effectiveConfig, existingProjects, { now: deps.now });
+  delete state.approvals;
+  delete state.pilotVerification;
+  delete state.planHash;
+  saveRunState(paths, state);
   writePrivateFile(paths, paths.plans, planPath, `${JSON.stringify(plan, null, 2)}\n`);
   const writeReport = deps.writeReviewReport || deps.writeReport;
   if (writeReport) writeReport(paths, reportPath, renderReviewHtml({ plan, taxonomy }));
   else writePrivateFile(paths, paths.reports, reportPath, renderReviewHtml({ plan, taxonomy }));
-  transitionState(state, "PLAN_REVIEW");
+  if (state.phase === "CLASSIFY") transitionState(state, "PLAN_REVIEW");
   saveRunState(paths, state);
   const phase = state.phase;
   const message = `Wrote .local/plans/migration-plan.json and ${reportPath}; no ChatGPT changes were made. Phase is ${phase}. Review the plan before any approval.`;

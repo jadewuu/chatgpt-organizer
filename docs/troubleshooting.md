@@ -24,11 +24,17 @@ Stop immediately. The organizer intentionally does not retry rate-limited writes
 
 ## Discovery or conversation reading is partial
 
-Keep the browser and coding agent stopped if the page state is uncertain. Rerun the repository's read-only discovery command; valid checkpoints allow completed reads to resume without inventing records. Inspect `.local/raw/` only on your machine. Do not fill gaps by editing inventory IDs or copying raw data into tracked files.
+Keep the browser and coding agent stopped if the page state is uncertain. `pnpm organizer discover` gathers metadata; `node scripts/04-read.js --all` extracts messages and reuses only complete validated checkpoints. Classification refuses missing or incomplete extraction. The conservative extraction contract currently supports a native text-message branch whose content exactly matches two stable rendered observations. Unsupported attachments, tools, formatting differences, incomplete responses, or unstable renders stop extraction; they are not saved as complete. Inspect `.local/raw/` only on your machine. Do not fill gaps by editing inventory IDs or copying raw data into tracked files.
+
+## Stable unique workspace identity is unavailable
+
+The experimental adapter has no accepted authenticated native workspace-ID contract yet. It deliberately blocks account-bound reads and writes. A visible label, including “Personal,” cannot distinguish workspaces. Preserve the stop and wait for a reviewed adapter update backed by authenticated contract evidence; do not invent an ID, patch state, or bypass the identity check. Synthetic workflow tests are not live acceptance.
 
 ## The plan hash changed or approval is rejected
 
-Do not reuse the old approval and do not edit the hash in either the plan or state. Regenerate and review the read-only report, confirm the taxonomy and every changed action, and approve the newly displayed exact hash only if it is correct. An edited plan always requires fresh review.
+Do not reuse the old approval and do not edit the hash in either the plan or state. Before any writes, edit `.local/plans/taxonomy.yaml` or `classifications.json` and rerun `pnpm organizer plan` in `PLAN_REVIEW`. It invalidates prior approvals and regenerates the hash and report. Confirm every changed action and approve the new exact hash only if correct.
+
+Once any write may have begun, do not regenerate or edit the old plan/state. Preserve the entire old `.local` run and its audit in a private location outside Git, reconcile the actual account state through a reviewed read-only adapter after its contract is accepted, and deliberately abandon the old execution before starting a separate fresh workflow with new discovery, classification, plan review, and a new pilot. Never copy old approvals/progress into the new run or manually mark uncertain work complete. Unchanged plans with successful batch verification can continue through the normal fresh-approved resume path.
 
 ## The account or workspace does not match
 

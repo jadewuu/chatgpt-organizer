@@ -117,8 +117,8 @@ test("verified pilot checks every done write, skips keep items, and advances to 
   assert.equal(code, 0);
   assert.deepEqual(adapter.calls, [
     ["fingerprint", "workspace-fixture"], ["projects"],
-    ["conversation", "fixture-move", "Work"],
-    ["conversation", "fixture-archive", "archived"],
+    ["conversation", "fixture-move", { kind: "project", name: "Work" }],
+    ["conversation", "fixture-archive", { kind: "archived" }],
   ]);
   const saved = loadRunState(paths);
   assert.equal(saved.phase, "APPLY_APPROVAL");
@@ -126,6 +126,11 @@ test("verified pilot checks every done write, skips keep items, and advances to 
   const audit = fs.readFileSync(path.join(paths.audit, "events.jsonl"), "utf8");
   assert.doesNotMatch(audit, /SECRET|UI CONTENT/);
   assert.equal(audit.trim().split("\n").length, 3);
+  const event = JSON.parse(audit.trim().split("\n")[1]);
+  assert.equal(event.provider, "chatgpt");
+  assert.ok(Number.isFinite(Date.parse(event.timestamp)));
+  assert.deepEqual(event.previousLocation, { kind: "unassigned" });
+  assert.deepEqual(event.verificationEvidence, { method: "conversation_location", status: "verified" });
   assert.match(output.join(""), /"verified":3/);
 });
 
@@ -256,7 +261,7 @@ test("pilot verification rejects progress claiming more than five completed writ
   assert.equal(constructions, 0);
 });
 
-test("full verification refuses incomplete progress without opening the adapter", async (t) => {
+test("full batch verification permits pending work but does not mark COMPLETE", async (t) => {
   const first = item("fixture-done");
   const missing = item("fixture-missing");
   const approvedPlan = plan([first, missing]);
@@ -272,10 +277,47 @@ test("full verification refuses incomplete progress without opening the adapter"
     paths,
     createAdapter() { constructions++; return new VerifyAdapter(); },
     stdout: { write: (value) => output.push(value) },
-  }), 1);
+  }), 0);
+  assert.equal(constructions, 1);
+  assert.equal(loadRunState(paths).phase, "APPLY_APPROVAL");
+});
+
+test("resuming final VERIFY cannot mark an incomplete schedule COMPLETE", async (t) => {
+  const approvedPlan = plan([item("fixture-pending")]);
+  const { paths } = fixture(t, { approvedPlan, phase: "VERIFY", entries: {},
+    stateChanges: { pilotVerification: { status: "verified", planHash: approvedPlan.planHash } } });
+  let constructions = 0;
+  await assert.rejects(run([], { paths, stdout: { write() {} },
+    createAdapter() { constructions++; return new VerifyAdapter(); } }), /incomplete|pending/i);
   assert.equal(constructions, 0);
-  assert.match(output.join(""), /fixture-missing/);
-  assert.equal(loadRunState(paths).phase, "APPLY");
+  assert.equal(loadRunState(paths).phase, "VERIFY");
+});
+
+test("31 actions require verified pilot and verified bounded continuation invocations", async (t) => {
+  const { run: apply } = require("../src/commands/apply");
+  const { FakeChatGPTAdapter } = require("./helpers/fake-chatgpt-adapter");
+  const approvedPlan = plan(Array.from({ length: 31 }, (_, n) => item(`batch-${n}`)));
+  const { paths } = fixture(t, { approvedPlan, phase: "PLAN_REVIEW", entries: {} });
+  const actions = [];
+  const deps = { paths, stdout: { write() {} }, config: { provider: "chatgpt", actions: { allowMove: true } },
+    createAdapter() { const adapter = new FakeChatGPTAdapter(); adapter.actions = actions; return adapter; } };
+  const args = (mode) => ["--mode", mode, "--approve", approvedPlan.planHash];
+  assert.equal(await apply(args("pilot"), deps), 0);
+  assert.equal(actions.length, 5);
+  assert.equal(loadRunState(paths).counts.pending, 26);
+  await assert.rejects(apply(args("resume"), deps), /phase/);
+  assert.equal(await run([], deps), 0);
+  assert.equal(await apply(args("resume"), deps), 0);
+  assert.equal(actions.length, 30);
+  assert.equal(loadRunState(paths).counts.pending, 1);
+  await assert.rejects(apply(args("resume"), deps), /phase/);
+  assert.equal(await run([], deps), 0);
+  assert.equal(loadRunState(paths).phase, "APPLY_APPROVAL");
+  assert.equal(await apply(args("resume"), deps), 0);
+  assert.equal(actions.length, 31);
+  assert.equal(await run([], deps), 0);
+  assert.equal(loadRunState(paths).phase, "COMPLETE");
+  assert.equal(new Set(actions.map((a) => a[1])).size, 31);
 });
 
 test("legacy write wrappers require the same mode and approval gates before delegation", async () => {

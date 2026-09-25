@@ -1,6 +1,6 @@
 const fs = require("node:fs");
 const path = require("node:path");
-const { appendAudit } = require("../core/audit");
+const { appendAudit, forensicContext } = require("../core/audit");
 const { actionKey, validateApprovedPlanSemantics } = require("../core/apply-engine");
 const { createPaths } = require("../core/paths");
 const { hashPlan } = require("../core/planner");
@@ -31,6 +31,7 @@ function scheduledActions(plan) {
     action: item.action,
     conversationId: item.conversationId,
     projectName: item.project,
+    currentProject: item.currentProject,
     localId: item.conversationId,
   }));
   return [...projects, ...conversations];
@@ -88,11 +89,13 @@ function validateStatic(paths) {
       if (status !== "done" && status !== "skipped") incomplete.push(action.localId);
     }
   }
+  if (state.phase === "VERIFY" && incomplete.length) throw new Error("Final verification has incomplete pending actions");
   return { plan, state, actions, incomplete };
 }
 
 function verificationEvent(state, action, status) {
   const event = {
+    ...forensicContext(action, status),
     type: "verification",
     runId: state.runId,
     actionKey: actionKey(action),
@@ -110,10 +113,6 @@ async function run(argv = [], deps = {}) {
   const paths = deps.paths || createPaths(path.resolve(deps.rootDir || process.cwd()));
   const validated = validateStatic(paths);
   const output = deps.stdout || process.stdout;
-  if (validated.incomplete.length) {
-    output.write(`${JSON.stringify({ verified: 0, manualReviewIds: validated.incomplete, phase: validated.state.phase })}\n`);
-    return 1;
-  }
   let adapter;
   try {
     if (deps.createAdapter) adapter = await deps.createAdapter({ paths });
@@ -148,7 +147,7 @@ async function run(argv = [], deps = {}) {
         result = !projectObservationFailed && exact.length === 1 ? { status: "verified" } : { status: "uncertain" };
         interrupted = projectObservationFailed;
       } else {
-        const expected = action.action === "archive" ? "archived" : action.projectName;
+        const expected = action.action === "archive" ? { kind: "archived" } : { kind: "project", name: action.projectName };
         try { result = await adapter.verifyConversationLocation(action.conversationId, expected); }
         catch { result = { status: "uncertain" }; interrupted = true; }
       }
@@ -172,6 +171,10 @@ async function run(argv = [], deps = {}) {
     const persist = deps.saveState || saveRunState;
     if (validated.state.phase === "PILOT") {
       validated.state.pilotVerification = { status: "verified", planHash: validated.plan.planHash };
+      transitionState(validated.state, "APPLY_APPROVAL");
+      persist(paths, validated.state);
+    } else if (validated.incomplete.length && validated.state.phase === "APPLY") {
+      delete validated.state.approvals.full;
       transitionState(validated.state, "APPLY_APPROVAL");
       persist(paths, validated.state);
     } else {

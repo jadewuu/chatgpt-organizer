@@ -1,5 +1,6 @@
 const { createHash } = require("node:crypto");
 const { validateTaxonomy, validateClassifications, validateMigrationPlan } = require("./validate");
+const { isCompleteConversationRecord } = require("../providers/chatgpt/normalize");
 
 const DEFAULT_EXCERPT_CODE_POINTS = 2000;
 
@@ -76,7 +77,11 @@ function buildClassificationInput(conversations, extracted = [], config = {}, op
   const threshold = classificationConfig(config).fullContentBelow ?? 0.9;
   return conversations.map((conversation) => {
     assertChatGPTConversation(conversation);
-    const messages = userMessages(records.get(conversation.conversationId));
+    const record = records.get(conversation.conversationId);
+    if (!isCompleteConversationRecord(record, conversation.conversationId)) {
+      throw new Error(`Complete extraction required for ${conversation.conversationId}; run node scripts/04-read.js --all before classification`);
+    }
+    const messages = userMessages(record);
     const first = messages[0]?.text || "";
     const last = messages.at(-1)?.text || "";
     const input = {

@@ -1,6 +1,7 @@
 const { hashPlan } = require("./planner");
 const { saveRunState } = require("./state");
 const { validateMigrationPlan } = require("./validate");
+const { forensicContext } = require("./audit");
 
 const approvalPattern = /^[a-f0-9]{64}$/;
 const stopStatuses = new Set(["rate_limited", "access_restricted", "selector_missing", "uncertain"]);
@@ -29,6 +30,7 @@ function actionsFor(plan) {
     action: item.action,
     conversationId: item.conversationId,
     projectName: item.project,
+    currentProject: item.currentProject,
   }));
   return [
     ...projects,
@@ -125,10 +127,11 @@ function resultCounts() {
   return { completed: 0, failed: 0, skipped: 0, uncertain: 0, stoppedReason: null };
 }
 
-function updateCounts(state, result) {
+function updateCounts(state, result, scheduledActions) {
   const entries = state.applyProgress?.entries || {};
   state.counts = {
-    pending: Object.values(entries).filter((entry) => entry.status === "running").length,
+    pending: scheduledActions.filter((action) => action.action !== "keep"
+      && !["done", "skipped", "uncertain"].includes(entries[actionKey(action)]?.status)).length,
     completed: Object.values(entries).filter((entry) => entry.status === "done").length,
     failed: result.failed,
     skipped: Object.values(entries).filter((entry) => entry.status === "skipped").length,
@@ -141,18 +144,19 @@ async function perform(adapter, action) {
   if (action.action === "move") {
     const result = await adapter.moveConversation(action.conversationId, action.projectName);
     if (result?.status !== "verified") return result;
-    return adapter.verifyConversationLocation(action.conversationId, action.projectName);
+    return adapter.verifyConversationLocation(action.conversationId, { kind: "project", name: action.projectName });
   }
   if (action.action === "archive") {
     const result = await adapter.archiveConversation(action.conversationId);
     if (result?.status !== "verified") return result;
-    return adapter.verifyConversationLocation(action.conversationId, "archived");
+    return adapter.verifyConversationLocation(action.conversationId, { kind: "archived" });
   }
   throw new Error(`Unsupported write action: ${action.action}`);
 }
 
 function auditEvent(state, mode, action, key, status, stoppedReason) {
   const event = {
+    ...forensicContext(action, status === "done" ? "verified" : stoppedReason || "pending"),
     type: "apply_action",
     runId: state.runId,
     actionKey: key,
@@ -202,7 +206,7 @@ async function runApply({ plan, state, adapter, approvalHash, config, mode, maxA
     if (attempts >= limit) break;
 
     entries[key] = { status: "running" };
-    updateCounts(state, result);
+    updateCounts(state, result, validation.scheduledActions);
     persist(state);
     await appendAudit(auditEvent(state, mode, action, key, "running"));
     attempts++;
@@ -219,7 +223,7 @@ async function runApply({ plan, state, adapter, approvalHash, config, mode, maxA
       entries[key] = { status: "uncertain" };
       result.uncertain++;
       result.stoppedReason = stoppedReason;
-      updateCounts(state, result);
+      updateCounts(state, result, validation.scheduledActions);
       persist(state);
       await appendAudit(auditEvent(state, mode, action, key, "uncertain", stoppedReason));
       return result;
@@ -227,11 +231,12 @@ async function runApply({ plan, state, adapter, approvalHash, config, mode, maxA
 
     entries[key] = { status: "done" };
     result.completed++;
-    updateCounts(state, result);
+    updateCounts(state, result, validation.scheduledActions);
     persist(state);
     await appendAudit(auditEvent(state, mode, action, key, "done"));
   }
-  updateCounts(state, result);
+  updateCounts(state, result, validation.scheduledActions);
+  persist(state);
   return result;
 }
 

@@ -2,6 +2,11 @@ const test = require("node:test");
 const assert = require("node:assert/strict");
 const { auditTrackedFiles } = require("../scripts/privacy-audit");
 
+test("rejects force-added execution artifacts and personalized action configuration", () => {
+  const files = [".superpowers/review.md", ".worktrees/branch/README.md", "config/organizer.yaml"];
+  assert.deepEqual(auditTrackedFiles(files).map((item) => item.file), files);
+});
+
 test("rejects tracked private artifacts", () => {
   const findings = auditTrackedFiles([
     "README.md",

@@ -2,9 +2,10 @@ const fs = require("node:fs");
 const path = require("node:path");
 const { createHash } = require("node:crypto");
 const { createPaths } = require("../../core/paths");
+const { writePrivateFile } = require("../../core/private-file");
 const { createBrowser, assertPrivatePath } = require("./browser");
 const { selectors, patterns } = require("./selectors");
-const { normalizeApiConversation, mergeConversations, isCompleteConversationRecord } = require("./normalize");
+const { normalizeApiConversation, mergeConversations, isCompleteConversationRecord, detailMessages } = require("./normalize");
 
 function isListUrl(value) {
   const url = new URL(value);
@@ -116,7 +117,13 @@ class ChatGPTAdapter {
     if (conversationId && response.status() === 200 && this.targetConversationLoad?.id === conversationId) {
       let request;
       try { request = response.request(); } catch { request = null; }
-      if (request && this.targetConversationLoad.requests.has(request)) this.targetConversationLoad.observed = true;
+      const load = this.targetConversationLoad;
+      if (request && load.requests.has(request)) {
+        if (load.requireContent) {
+          try { load.messages = detailMessages(await response.json(), conversationId); } catch { load.messages = null; }
+        }
+        load.observed = true;
+      }
     }
     if (list) {
       if (response.status() !== 200) {
@@ -197,20 +204,26 @@ class ChatGPTAdapter {
 
   async #observeWorkspaceFingerprint() {
     const observe = async () => {
+      await this.checkResponses();
       const snapshot = await this.page.evaluate(({ command, selector }) => {
         const visible = (node) => node.getClientRects().length > 0
           && !["hidden", "collapse"].includes(getComputedStyle(node).visibility)
           && getComputedStyle(node).opacity !== "0";
         const markers = [...document.querySelectorAll(selector)].filter(visible)
           .map((node) => (node.innerText || node.textContent || "").normalize("NFC").trim()).filter(Boolean);
-        return { command, url: location.href, markers };
+        // No authenticated native workspace-ID contract has been accepted yet.
+        // Fail closed until that contract is established; a display label is not an ID.
+        return { command, url: location.href, markers, nativeIdentity: null };
       }, { command: "workspaceContext", selector: selectors.workspaceContext });
       let url;
       try { url = new URL(snapshot?.url); } catch { throw new Error("Workspace context URL is unavailable"); }
       if (url.origin !== "https://chatgpt.com" || snapshot.markers?.length !== 1) {
         throw new Error("Workspace context is missing or ambiguous");
       }
-      return createHash("sha256").update(snapshot.markers[0]).digest("hex");
+      if (typeof snapshot.nativeIdentity !== "string" || !snapshot.nativeIdentity.trim()) {
+        throw new Error("Stable unique workspace identity unavailable; authenticated native contract validation is pending");
+      }
+      return createHash("sha256").update(JSON.stringify([this.fingerprint, snapshot.nativeIdentity, snapshot.markers[0]])).digest("hex");
     };
     const first = await observe();
     await this.page.waitForTimeout(500);
@@ -387,7 +400,7 @@ class ChatGPTAdapter {
       if (patterns.accessRestriction.test(snapshot.text || "")) return writeResult("access_restricted", "Access restriction detected");
       const markers = (snapshot.workspaceMarkers || []).map((value) => value.normalize("NFC").trim()).filter(Boolean);
       if (markers.length !== 1) return writeResult("uncertain", "Workspace context is missing or ambiguous");
-      const digest = createHash("sha256").update(markers[0]).digest("hex");
+      const digest = await this.#observeWorkspaceFingerprint();
       if ((this.workspaceFingerprint && this.workspaceFingerprint !== digest)
         || (this.writeWorkspaceDigest && this.writeWorkspaceDigest !== digest)) {
         return writeResult("access_restricted", "Workspace context changed");
@@ -553,12 +566,12 @@ class ChatGPTAdapter {
     if (url.origin !== "https://chatgpt.com" || url.pathname !== `/c/${id}`) {
       return writeResult("uncertain", "Conversation location cannot be confirmed");
     }
-    if (expected === "archived") {
+    if (expected.kind === "archived") {
       return snapshot.archived
         ? writeResult("verified", "Archived state observed")
         : writeResult("uncertain", "Archived state was not observed");
     }
-    const exact = (snapshot.projectNames || []).filter((name) => name === expected);
+    const exact = (snapshot.projectNames || []).filter((name) => name === expected.name);
     return exact.length === 1 && snapshot.archived !== true
       ? writeResult("verified", "Exact destination Project observed")
       : writeResult("uncertain", "Exact destination Project was not observed");
@@ -593,7 +606,7 @@ class ChatGPTAdapter {
     if (prepared.status !== "verified") return prepared;
     let step = await this.#navigateConversationForWrite(id);
     if (step.status !== "verified") return step;
-    const current = await this.#observeConversationLocation(id, project);
+    const current = await this.#observeConversationLocation(id, { kind: "project", name: project });
     if (current.status === "verified") return writeResult("verified", "Conversation already has the exact destination Project");
     if (current.status !== "uncertain") return current;
     step = await this.#clickUnique({ control: "header", selector: selectors.headerOptions, pattern: /.*/ });
@@ -603,7 +616,7 @@ class ChatGPTAdapter {
     step = await this.#clickUnique({ control: "destination", selector: selectors.projectChoices, pattern: /.*/, exactText: project });
     if (step.status !== "verified") return step;
     await this.page.waitForTimeout(500);
-    return this.#observeConversationLocation(id, project);
+    return this.#observeConversationLocation(id, { kind: "project", name: project });
   }
 
   async archiveConversation(id) {
@@ -612,7 +625,7 @@ class ChatGPTAdapter {
     if (prepared.status !== "verified") return prepared;
     let step = await this.#navigateConversationForWrite(id);
     if (step.status !== "verified") return step;
-    const current = await this.#observeConversationLocation(id, "archived");
+    const current = await this.#observeConversationLocation(id, { kind: "archived" });
     if (current.status === "verified") return writeResult("verified", "Conversation is already archived");
     if (current.status !== "uncertain") return current;
     step = await this.#clickUnique({ control: "header", selector: selectors.headerOptions, pattern: /.*/ });
@@ -620,12 +633,15 @@ class ChatGPTAdapter {
     step = await this.#clickUnique({ control: "archive", selector: selectors.openMenuItems, pattern: patterns.archiveControl });
     if (step.status !== "verified") return step;
     await this.page.waitForTimeout(500);
-    return this.#observeConversationLocation(id, "archived");
+    return this.#observeConversationLocation(id, { kind: "archived" });
   }
 
   async verifyConversationLocation(id, expected) {
     validateConversationId(id);
-    if (expected !== "archived") validateProjectName(expected);
+    if (!expected || typeof expected !== "object" || !["archived", "project"].includes(expected.kind)) {
+      throw new Error("A typed expected location is required");
+    }
+    if (expected.kind === "project") validateProjectName(expected.name);
     const prepared = await this.#prepareWrite();
     if (prepared.status !== "verified") return prepared;
     const navigation = await this.#navigateConversationForWrite(id);
@@ -641,35 +657,41 @@ class ChatGPTAdapter {
     const existing = this.readConversationCheckpoint(id);
     if (isCompleteConversationRecord(existing, id)) return existing;
     const url = `https://chatgpt.com/c/${id}`;
+    const load = { id, revision: ++this.conversationLoadRevision, observed: false, requests: new Set(), requireContent: true };
+    this.targetConversationLoad = load;
+    this.loadedConversationEvidence = null;
     try { await this.page.evaluate((url) => { location.href = url; }, url); }
     catch (error) { if (!/execution context was destroyed|navigation/i.test(error.message)) throw error; }
-    let ready = false;
+    let previous = null;
+    let record = null;
     for (let i = 0; i < 40; i++) {
       await this.page.waitForTimeout(500);
       await this.checkResponses();
-      let state;
+      if (this.targetConversationLoad !== load) throw new Error("Conversation load changed; checkpoint unchanged");
+      if (!load.observed || !load.messages) continue;
+      if (!(await this.loginState()).loggedIn) throw new Error("Login required in the dedicated profile; stopped");
+      let data;
       try {
-        state = await this.page.evaluate(({ selector }) => ({ count: document.querySelectorAll(selector).length, url: location.href }),
-          { selector: selectors.messageRoles });
-      } catch { continue; }
-      if (state.count > 0 && new URL(state.url).origin === "https://chatgpt.com" && new URL(state.url).pathname === `/c/${id}`) { ready = true; break; }
+        data = await this.page.evaluate(({ selectors }) => ({
+          url: location.href,
+          title: document.title.replace(/\s*[-|]\s*ChatGPT.*$/i, "").trim(),
+          busy: !!document.querySelector('[aria-busy="true"], [data-is-streaming="true"]'),
+          messages: [...document.querySelectorAll(selectors.messageRoles)].map((node) => {
+            const content = node.querySelector(selectors.markdown) || node;
+            return { role: node.getAttribute("data-message-author-role"), text: (content.innerText || content.textContent || "").trim() };
+          }),
+        }), { selectors });
+      } catch { previous = null; continue; }
+      await this.checkResponses();
+      const candidate = { provider: "chatgpt", conversationId: id, title: data.title, url: data.url,
+        messages: data.messages, extractionEvidence: { fullIdResponse: true, stableRender: true, complete: true } };
+      const complete = !data.busy && isCompleteConversationRecord(candidate, id)
+        && this.page.url() === url && JSON.stringify(data.messages) === JSON.stringify(load.messages);
+      if (complete && previous === JSON.stringify(data)) { record = candidate; break; }
+      previous = complete ? JSON.stringify(data) : null;
     }
-    if (!ready) throw new Error("Conversation did not load at the requested full ID; stopped");
-    await this.page.waitForTimeout(1200);
-    if (!(await this.loginState()).loggedIn) throw new Error("Login required in the dedicated profile; stopped");
-    const data = await this.page.evaluate(({ selectors }) => ({
-      url: location.href,
-      title: document.title.replace(/\s*[-|]\s*ChatGPT.*$/i, "").trim(),
-      messages: [...document.querySelectorAll(selectors.messageRoles)].map((node) => {
-        const content = node.querySelector(selectors.markdown) || node;
-        return { role: node.getAttribute("data-message-author-role"), text: (content.innerText || content.textContent || "").trim().slice(0, 20000) };
-      }),
-    }), { selectors });
-    await this.checkResponses();
-    const record = { provider: "chatgpt", conversationId: id, title: data.title, url: data.url, extractedAt: new Date().toISOString(), messages: data.messages };
-    if (!isCompleteConversationRecord(record, id) || !isCompleteConversationRecord({ ...record, url: this.page.url() }, id)) {
-      throw new Error("Incomplete conversation snapshot or changed navigation; checkpoint unchanged");
-    }
+    if (!record) throw new Error("Incomplete conversation snapshot: fresh full-ID response and stable complete render required; checkpoint unchanged");
+    record.extractedAt = new Date().toISOString();
     this.writeJson(target, record);
     return record;
   }
@@ -688,11 +710,9 @@ class ChatGPTAdapter {
 
   writeJson(target, value) {
     assertPrivatePath(this.paths, target);
-    assertPrivatePath(this.paths, `${target}.tmp`);
-    fs.mkdirSync(path.dirname(target), { recursive: true, mode: 0o700 });
-    fs.writeFileSync(`${target}.tmp`, `${JSON.stringify(value, null, 2)}\n`, { mode: 0o600 });
-    fs.chmodSync(`${target}.tmp`, 0o600);
-    fs.renameSync(`${target}.tmp`, target);
+    const directory = [this.paths.raw, this.paths.state].find((base) => target.startsWith(`${base}${path.sep}`));
+    if (!directory) throw new Error("Unsupported private artifact directory");
+    writePrivateFile(this.paths, directory, target, `${JSON.stringify(value, null, 2)}\n`);
   }
 
   async close() {

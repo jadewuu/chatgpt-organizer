@@ -77,6 +77,7 @@ function renderReviewHtml({ plan = {}, taxonomy = {} } = {}) {
   const projects = projectRows(asArray(plan.projects), taxonomyProjects);
   const proposedMoves = items.filter((item) => item?.action === "move");
   const unresolved = items.filter((item) => item?.status === "unresolved");
+  const intentionalKeeps = items.filter((item) => item?.action === "keep" && item?.status !== "unresolved");
   const archiveCandidates = items.filter((item) => item?.suggestedAction === "archive");
   const classified = items.filter((item) => item?.project !== null && item?.project !== undefined).length;
   const createRequired = projects.filter((project) => project.createRequired);
@@ -148,6 +149,7 @@ th, td { border: 1px solid #8886; padding: .5rem; text-align: left; vertical-ali
 </section>
 ${bucket("Proposed moves", proposedMoves, "No proposed moves.")}
 ${bucket("Unresolved", unresolved, "No unresolved conversations.")}
+${bucket("Intentional keep", intentionalKeeps, "No intentional keep decisions.")}
 ${bucket("Archive candidates", archiveCandidates, "No archive candidates.")}
 <script>
 (() => {

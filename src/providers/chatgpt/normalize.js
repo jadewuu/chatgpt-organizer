@@ -28,7 +28,9 @@ function mergeConversations(items) {
 function isCompleteConversationRecord(record, id) {
   if (!record || record.provider !== "chatgpt" || record.conversationId !== id
     || typeof id !== "string" || !/^[A-Za-z0-9_-]+$/.test(id)
-    || typeof record.url !== "string" || !Array.isArray(record.messages) || record.messages.length === 0) return false;
+    || typeof record.url !== "string" || !Array.isArray(record.messages) || record.messages.length === 0
+    || record.extractionEvidence?.fullIdResponse !== true || record.extractionEvidence?.stableRender !== true
+    || record.extractionEvidence?.complete !== true) return false;
   let url;
   try { url = new URL(record.url); } catch { return false; }
   return url.origin === "https://chatgpt.com" && url.pathname === `/c/${id}`
@@ -36,4 +38,27 @@ function isCompleteConversationRecord(record, id) {
       && typeof message.text === "string" && message.text.trim().length > 0);
 }
 
-module.exports = { normalizeApiConversation, mergeConversations, isCompleteConversationRecord };
+function detailMessages(data, id) {
+  if (data?.conversation_id !== id || !data.mapping || typeof data.current_node !== "string") return null;
+  const messages = [];
+  const visited = new Set();
+  let nodeId = data.current_node;
+  while (nodeId !== null) {
+    if (typeof nodeId !== "string" || visited.has(nodeId)) return null;
+    visited.add(nodeId);
+    const node = data.mapping[nodeId];
+    if (!node) return null;
+    const message = node.message;
+    if (message && ["user", "assistant"].includes(message.author?.role)) {
+      if (message.content?.content_type !== "text" || !Array.isArray(message.content.parts)
+        || !message.content.parts.every((part) => typeof part === "string")) return null;
+      const text = message.content.parts.join("").trim();
+      if (!text) return null;
+      messages.unshift({ role: message.author.role, text });
+    } else if (message && !["system", "developer"].includes(message.author?.role)) return null;
+    nodeId = node.parent;
+  }
+  return messages.length ? messages : null;
+}
+
+module.exports = { normalizeApiConversation, mergeConversations, isCompleteConversationRecord, detailMessages };

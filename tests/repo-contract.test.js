@@ -18,8 +18,8 @@ const safetyClauses = [
 const stages = [
   "1. Run `pnpm organizer doctor` and report failures.",
   "2. Use `pnpm organizer login` only when authentication is required.",
-  "3. Run `pnpm organizer plan`; keep all actions read-only.",
-  "4. Ask the user to approve the taxonomy and migration report.",
+  "3. Run `pnpm organizer discover` for metadata, then `pnpm organizer plan` to prepare the taxonomy; keep all actions read-only.",
+  "4. Obtain taxonomy approval, run `node scripts/04-read.js --all` for complete private message checkpoints, then `pnpm organizer plan` to produce first/last-message input. Write bounded schema-valid classifications, rerun `plan`, and ask the user to review the migration report.",
   "5. After explicit approval, run a maximum five-action pilot.",
   "6. Verify the pilot and report results before requesting full-apply approval.",
   "7. Resume approved actions in batches and stop on any safety condition.",
@@ -34,15 +34,15 @@ const releaseWorkflowClauses = [
 
 const workflowRows = [
   "| `PREFLIGHT` | `pnpm organizer doctor` | Environment and private-data safety report | None; this command is read-only. |",
-  "| `AUTHENTICATE` | `pnpm organizer login`, only when authentication is required | Dedicated-profile session and account fingerprint in `.local/state/run.json` | Manual user authentication only; it is not approval to write. |",
-  "| `DISCOVER` | `pnpm organizer plan` | Read-only conversation inventory and resumable checkpoints under `.local/` | None; planning is read-only. |",
-  "| `TAXONOMY_REVIEW` | `pnpm organizer plan` after the user approves the taxonomy | Approved taxonomy artifact | Explicit approval of the proposed Project taxonomy. |",
-  "| `CLASSIFY` | `pnpm organizer plan` | Classifications and a migration plan | The taxonomy approval recorded in the preceding phase. |",
+  "| `AUTHENTICATE` | `pnpm organizer login`, only when authentication is required | Dedicated-profile session and account/workspace fingerprints in `.local/state/account.json` | Manual user authentication only; it is not approval to write. |",
+  "| `DISCOVER` | `pnpm organizer discover`, then `pnpm organizer plan` | Metadata inventory and Projects in `.local/raw/`, run state in `.local/state/run.json`; `plan` prepares `.local/plans/taxonomy.yaml` and enters `TAXONOMY_REVIEW` | None; discovery and planning are read-only. |",
+  "| `TAXONOMY_REVIEW` | After taxonomy approval, `node scripts/04-read.js --all`, then `pnpm organizer plan` | Complete message checkpoints in `.local/raw/conversations/`, then first/last-message `classification-input.jsonl` | Explicit approval of the proposed Project taxonomy. Extraction is read-only; further model excerpts require separate full-content permission. |",
+  "| `CLASSIFY` | Agent writes schema-valid `classifications.json`, then `pnpm organizer plan` | Hashed migration plan and `.local/reports/review.html` | The taxonomy approval recorded in the preceding phase. |",
   "| `PLAN_REVIEW` | Record approval, then use `pnpm organizer apply` only for the pilot | Reviewed migration report and plan hash | Explicit approval of the generated migration plan and its taxonomy. |",
   "| `PILOT_APPROVAL` | `pnpm organizer apply` | At most five approved write actions | Explicit approval to execute a maximum five-item pilot from the unchanged plan. |",
   "| `PILOT` | `pnpm organizer verify` | Pilot verification results and audit events | None beyond the pilot approval; stop if any safety condition occurs. |",
   "| `APPLY_APPROVAL` | `pnpm organizer apply` | Approved batched actions | Explicit approval of the verified pilot and the remaining unchanged plan. |",
-  "| `APPLY` | `pnpm organizer verify` | Action audit and post-apply verification results | The recorded full-apply approval; stop if any safety condition occurs. |",
+  "| `APPLY` | `pnpm organizer verify` | Verified batch returns to `APPLY_APPROVAL` if work remains; otherwise advances through `VERIFY` to `COMPLETE` | Each next batch requires fresh exact-hash approval after successful verification; stop if any safety condition occurs. |",
   "| `VERIFY` | `pnpm organizer verify` | Final verification report | No new approval; verification must be certain before completion. |",
   "| `COMPLETE` | No command | Completed local audit record | None. Offer `pnpm organizer clean:data`; cleanup requires its own confirmation. |",
 ];

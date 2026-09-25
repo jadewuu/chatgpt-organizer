@@ -7,6 +7,17 @@ const { runDoctor } = require("../src/commands/doctor");
 const { createPaths } = require("../src/core/paths");
 const { main } = require("../src/cli");
 
+test("doctor rejects symlinked private path components without modifying them", async (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "organizer-doctor-links-"));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const paths = createPaths(root);
+  fs.mkdirSync(paths.local);
+  fs.symlinkSync(root, paths.state);
+  const checks = await runDoctor({ rootDir: root, chromeExists: true });
+  assert.equal(checks.find((check) => check.name === "paths").status, "fail");
+  assert.equal(fs.lstatSync(paths.state).isSymbolicLink(), true);
+});
+
 function outputBuffer() {
   let value = "";
   return {

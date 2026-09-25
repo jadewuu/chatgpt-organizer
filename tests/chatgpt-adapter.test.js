@@ -15,7 +15,7 @@ const { main: readWrapper } = require("../scripts/04-read");
 const fixtures = require("./fixtures/conversations.json");
 
 function setup(t, { loggedIn = true, status = 200, accountId = "fixture-account", emitSession = true, emitList = true,
-  workspaceMarkers = ["Synthetic workspace"],
+  workspaceMarkers = ["Synthetic workspace"], nativeIdentity = "synthetic-workspace-id", emitDetail = true,
   listJson = async () => ({ items: [...fixtures, { ...fixtures[0], title: "Synthetic latest", update_time: 1700000400 }] }) } = {}) {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "organizer-adapter-"));
   t.after(() => fs.rmSync(root, { recursive: true, force: true }));
@@ -62,6 +62,17 @@ function setup(t, { loggedIn = true, status = 200, accountId = "fixture-account"
   page.evaluate = async (fn, arg) => {
     const result = vm.runInNewContext(`(${fn.toString()})(arg)`, { arg, document, location,
       getComputedStyle: (node) => ({ visibility: node.visibility || "visible", opacity: "1" }) });
+    // Synthetic native identity contract only; the live extractor remains unaccepted.
+    if (arg?.command === "workspaceContext") result.nativeIdentity = nativeIdentity;
+    if (typeof arg === "string" && arg.startsWith("https://chatgpt.com/c/") && emitDetail) {
+      const id = arg.split("/").at(-1);
+      const request = { url: () => `https://chatgpt.com/backend-api/conversation/${id}` };
+      page.emit("request", request);
+      page.emit("response", { url: request.url, request: () => request, status: () => 200,
+        json: async () => ({ conversation_id: id, current_node: "m1", mapping: {
+          m1: { parent: null, message: { author: { role: "user" }, content: { content_type: "text", parts: ["Synthetic message"] } } },
+        } }) });
+    }
     return result === undefined ? undefined : JSON.parse(JSON.stringify(result));
   };
   let closed = 0;
@@ -96,7 +107,7 @@ test("fingerprint persists only a stable 16-hex digest and rejects account chang
   const saved = fs.readFileSync(path.join(paths.state, "account.json"), "utf8");
   assert.deepEqual(JSON.parse(saved), {
     accountFingerprint: fingerprint,
-    workspaceFingerprint: require("node:crypto").createHash("sha256").update("Synthetic workspace").digest("hex"),
+    workspaceFingerprint: require("node:crypto").createHash("sha256").update(JSON.stringify([fingerprint, "synthetic-workspace-id", "Synthetic workspace"])).digest("hex"),
   });
   assert.doesNotMatch(saved, /fixture-account|fixture@example|synthetic-token|Synthetic workspace/);
   page.emit("response", { url: () => "https://chatgpt.com/api/auth/session", status: () => 200,
@@ -235,7 +246,12 @@ for (const failed of [false, true]) {
 test("final extraction rejects disappeared message nodes without replacing a checkpoint", async (t) => {
   const { adapter, paths, page, setMessages } = setup(t);
   const target = path.join(paths.raw, "conversations", "fixture-chat-1.json");
-  page.waitForTimeout = async (ms) => { if (ms === 1200) setMessages([]); };
+  const evaluate = page.evaluate;
+  page.evaluate = async (fn, arg) => {
+    const value = await evaluate(fn, arg);
+    if (value?.messages) setMessages([]);
+    return value;
+  };
   await assert.rejects(adapter.readConversation("fixture-chat-1"), /incomplete|message|snapshot/i);
   assert.equal(fs.existsSync(target), false);
 });
@@ -516,7 +532,7 @@ function writeSetup(t, changes = {}) {
       return;
     }
     if (arg?.command === "safety") return { ...state.safety, url: state.url };
-    if (arg?.command === "workspaceContext") return { url: state.url, markers: state.safety.workspaceMarkers };
+    if (arg?.command === "workspaceContext") return { url: state.url, markers: state.safety.workspaceMarkers, nativeIdentity: "synthetic-write-workspace-id" };
     if (arg?.command === "targetConversation") {
       const rendered = Array.isArray(state.targetObservations)
         ? state.targetObservations.shift()
@@ -628,7 +644,7 @@ test("Project creation is exact, idempotent, and verified from the sidebar", asy
 test("move and archive return verified only after observable final-state confirmation", async (t) => {
   const moved = writeSetup(t);
   assert.equal((await moved.adapter.moveConversation("fixture-chat", "Work")).status, "verified");
-  assert.equal((await moved.adapter.verifyConversationLocation("fixture-chat", "Work")).status, "verified");
+  assert.equal((await moved.adapter.verifyConversationLocation("fixture-chat", { kind: "project", name: "Work" })).status, "verified");
 
   const alreadyMoved = writeSetup(t, { currentProject: "Work" });
   assert.equal((await alreadyMoved.adapter.moveConversation("fixture-chat", "Work")).status, "verified");
@@ -639,7 +655,7 @@ test("move and archive return verified only after observable final-state confirm
 
   const archived = writeSetup(t);
   assert.equal((await archived.adapter.archiveConversation("fixture-chat")).status, "verified");
-  assert.equal((await archived.adapter.verifyConversationLocation("fixture-chat", "archived")).status, "verified");
+  assert.equal((await archived.adapter.verifyConversationLocation("fixture-chat", { kind: "archived" })).status, "verified");
 
   const alreadyArchived = writeSetup(t, { archived: true });
   assert.equal((await alreadyArchived.adapter.archiveConversation("fixture-chat")).status, "verified");
@@ -697,4 +713,90 @@ test("write adapter rejects invalid identifiers and destructive matched controls
   assert.equal((await destructive.adapter.archiveConversation("fixture-chat")).status, "selector_missing");
   assert.deepEqual(destructive.state.clicks, ["header"]);
   assert.equal(typeof adapter.removeConversation, "undefined");
+});
+
+test("a Project named archived cannot collide with archive state", async (t) => {
+  const moved = writeSetup(t, { currentProject: "archived" });
+  assert.equal((await moved.adapter.verifyConversationLocation("fixture-chat", { kind: "project", name: "archived" })).status, "verified");
+  assert.equal((await moved.adapter.verifyConversationLocation("fixture-chat", { kind: "archived" })).status, "uncertain");
+  const archived = writeSetup(t, { archived: true, confirmMove: false });
+  assert.equal((await archived.adapter.moveConversation("fixture-chat", "archived")).status, "uncertain");
+  assert.deepEqual(archived.state.clicks, ["header", "move", "destination:archived"]);
+});
+
+test("read rejects stale nodes without a fresh successful full-ID detail response", async (t) => {
+  for (const status of [null, 503]) {
+    const { adapter, paths, page } = setup(t, { emitDetail: false });
+    const evaluate = page.evaluate;
+    page.evaluate = async (fn, arg) => {
+      const result = await evaluate(fn, arg);
+      if (typeof arg === "string" && status !== null) {
+        const request = { url: () => "https://chatgpt.com/backend-api/conversation/fixture-stale" };
+        page.emit("request", request);
+        page.emit("response", { url: request.url, request: () => request, status: () => status });
+      }
+      return result;
+    };
+    await assert.rejects(adapter.readConversation("fixture-stale"), /fresh|response|load|snapshot/i);
+    assert.equal(fs.existsSync(path.join(paths.raw, "conversations", "fixture-stale.json")), false);
+  }
+});
+
+test("account state writer cannot follow a planted temporary symlink", (t) => {
+  const { adapter, paths } = setup(t);
+  fs.mkdirSync(paths.state, { recursive: true });
+  const victim = path.join(paths.root, "victim");
+  fs.writeFileSync(victim, "unchanged");
+  fs.symlinkSync(victim, path.join(paths.state, "account.json.tmp"));
+  adapter.writeJson(path.join(paths.state, "account.json"), { synthetic: true });
+  assert.equal(fs.readFileSync(victim, "utf8"), "unchanged");
+});
+
+test("workspace display labels alone cannot establish unique identity", async (t) => {
+  const { adapter } = setup(t, { nativeIdentity: null });
+  await assert.rejects(adapter.getAccountFingerprint(), /unique|identity|unavailable/i);
+});
+
+test("distinct native workspace IDs with the same label produce different bindings", async (t) => {
+  const first = setup(t, { nativeIdentity: "synthetic-id-a" }).adapter;
+  const second = setup(t, { nativeIdentity: "synthetic-id-b" }).adapter;
+  await first.getAccountFingerprint();
+  await second.getAccountFingerprint();
+  assert.notEqual(first.workspaceFingerprint, second.workspaceFingerprint);
+});
+
+test("read waits for delayed complete rendering and does not save a stable partial render", async (t) => {
+  for (const eventuallyComplete of [false, true]) {
+    const { adapter, paths, page } = setup(t);
+    const evaluate = page.evaluate;
+    let snapshots = 0;
+    page.evaluate = async (fn, arg) => {
+      const value = await evaluate(fn, arg);
+      if (value?.messages && (!eventuallyComplete || snapshots++ < 3)) value.messages = [{ role: "user", text: "Synthetic" }];
+      return value;
+    };
+    if (eventuallyComplete) {
+      const record = await adapter.readConversation("fixture-render");
+      assert.equal(record.messages[0].text, "Synthetic message");
+      assert.ok(snapshots >= 5);
+    } else {
+      await assert.rejects(adapter.readConversation("fixture-render"), /incomplete|render|snapshot/i);
+      assert.equal(fs.existsSync(path.join(paths.raw, "conversations", "fixture-render.json")), false);
+    }
+  }
+});
+
+test("fresh discovery and read wrapper produce actual first-pass messages before classification", async (t) => {
+  const { adapter, paths } = setup(t);
+  const output = { write() {} };
+  assert.equal(await main(["discover", "--max", "1"], { adapter, paths, stdout: output, stderr: output }), 0);
+  assert.equal(fs.existsSync(path.join(paths.raw, "conversations")), false);
+  assert.equal(await main(["plan"], { paths, rootDir: paths.root, stdout: output, stderr: output }), 0);
+  assert.equal(await main(["plan"], { paths, rootDir: paths.root, stdout: output, stderr: output }), 1);
+  await readWrapper(["--all"], { adapter, paths });
+  assert.equal(await main(["plan"], { paths, rootDir: paths.root, stdout: output, stderr: output }), 0);
+  const input = JSON.parse(fs.readFileSync(path.join(paths.plans, "classification-input.jsonl"), "utf8"));
+  assert.equal(input.firstUserMessage, "Synthetic message");
+  assert.equal(input.lastUserMessage, "Synthetic message");
+  assert.equal(loadRunState(paths).phase, "CLASSIFY");
 });

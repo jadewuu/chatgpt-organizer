@@ -2,6 +2,9 @@ const { execFileSync } = require("node:child_process");
 
 const forbidden = [
   /^\.local\//,
+  /^\.superpowers\//,
+  /^\.worktrees\//,
+  /^config\/organizer\.yaml$/,
   /^data\//,
   /^profile\//,
   /^chrome-profile\//,

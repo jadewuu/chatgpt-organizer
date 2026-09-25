@@ -31,15 +31,39 @@ function safeEvent(event) {
   if (!event || typeof event !== "object" || Array.isArray(event)) {
     throw new Error("Audit event must be an object");
   }
-  const output = {};
+  const output = { timestamp: new Date().toISOString(), provider: "chatgpt" };
   for (const [key, value] of Object.entries(event)) {
     if (allowedFields.has(key) && (typeof value === "string" || typeof value === "number" || typeof value === "boolean")) {
       if (allowedValues[key] && !allowedValues[key].has(value)) continue;
       output[key] = value;
     }
   }
+  const previous = event.previousLocation;
+  if (["unknown", "unassigned", "absent"].includes(previous?.kind)) output.previousLocation = { kind: previous.kind };
+  else if (previous?.kind === "project" && typeof previous.id === "string" && previous.id.length <= 1024) {
+    output.previousLocation = { kind: "project", id: previous.id };
+  }
+  const evidence = event.verificationEvidence;
+  if (["not_checked", "conversation_location", "project_inventory"].includes(evidence?.method)
+    && ["pending", "verified", "uncertain", "rate_limited", "access_restricted", "selector_missing", "browser_interrupted"].includes(evidence?.status)) {
+    output.verificationEvidence = { method: evidence.method, status: evidence.status };
+  }
   if (typeof output.type !== "string" || !output.type) throw new Error("Audit event type is required");
   return output;
+}
+
+function forensicContext(action, status = "pending") {
+  return {
+    timestamp: new Date().toISOString(),
+    provider: "chatgpt",
+    previousLocation: action.kind === "project" ? { kind: "absent" }
+      : typeof action.currentProject === "string" ? { kind: "project", id: action.currentProject }
+        : action.currentProject === null ? { kind: "unassigned" } : { kind: "unknown" },
+    verificationEvidence: {
+      method: status === "pending" ? "not_checked" : action.kind === "project" ? "project_inventory" : "conversation_location",
+      status,
+    },
+  };
 }
 
 function appendAudit(paths, event) {
@@ -77,4 +101,4 @@ function appendAudit(paths, event) {
   }
 }
 
-module.exports = { appendAudit };
+module.exports = { appendAudit, forensicContext };

@@ -17,7 +17,8 @@ Include the affected commit, operating-system and Chrome versions, the command a
 - All user-derived artifacts belong under the ignored `.local/` directory.
 - The dedicated Chrome profile contains cookies and login state and must be treated as a secret-bearing directory.
 - Semantic processing occurs in the user's own Codex or Claude Code runtime. There is no maintainer API key, backend, telemetry, or data-collection service.
-- Only ChatGPT Web history is a verified v0.1 target. Claude Web history is unsupported and unverified; Codex and Claude Code are runtimes, not providers.
+- ChatGPT Web history is the only v0.1 target. The new adapter is experimental; authenticated acceptance is pending, despite earlier personal validation of legacy scripts. Claude Web history is unsupported and unverified; Codex and Claude Code are runtimes, not providers.
+- Stable unique workspace identity must come from a trusted native contract. That contract is not yet established, so account-bound operations currently fail closed; a display name never authorizes reads or writes. No release tag or publication is permitted before authenticated acceptance.
 - Planning is read-only. Writes require the exact unchanged plan hash, stable account/workspace context, a maximum five-write pilot, verification, and separate approval for bounded resume.
 - Conversation and Project deletion is unsupported. Never add or improvise a delete operation.
 - Rate limits, access restrictions, account/workspace mismatches, selector ambiguity, browser interruption, and uncertain verification are stop conditions, not retry invitations.

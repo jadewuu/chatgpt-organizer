@@ -13,6 +13,10 @@
 - Codex and Claude Code are supported agent runtimes for this repository, but this does not provide Claude Web history or provider compatibility.
 - Approve the pilot only by passing the exact unchanged plan hash to `pnpm organizer apply --mode pilot --approve <plan-hash>`.
 - After pilot verification, obtain separate approval before `pnpm organizer apply --mode resume --approve <plan-hash>`; every resume is bounded and stops on uncertainty.
+- Verify each batch before another fresh-approved resume; pending work returns to APPLY_APPROVAL, and only final verification marks COMPLETE.
+- The experimental v0.1 adapter has no accepted native unique-workspace identity contract yet. Preserve its fail-closed stop; never use a display-name fingerprint or invent an ID. Authenticated acceptance is required before tagging or publication.
+- Discovery is metadata-only. Run `node scripts/04-read.js --all` for complete private message checkpoints before classification; missing extraction is not a completed first pass.
+- Regenerate plans in PLAN_REVIEW only before writes. After a possible write, preserve state/audit and follow the documented recovery path without editing hashes or progress.
 - Normal `pnpm organizer clean:data` preserves `.local/state` and `.local/profile`; `--include-profile` requires a separate confirmation and a new login afterward.
 - Enable only the action flags required by the reviewed plan.
 - These flags are capability gates, not write approval, and they do not replace explicit approval of the exact unchanged plan hash.

@@ -266,7 +266,7 @@ test("post-action verification must be verified", async () => {
   const result = await apply({ plan: plan([item(0), item(1)]), adapter });
   assert.equal(result.stoppedReason, "uncertain");
   assert.equal(adapter.actions.length, 1);
-  assert.deepEqual(adapter.verifications, [["fixture-0", "Work"]]);
+  assert.deepEqual(adapter.verifications, [["fixture-0", { kind: "project", name: "Work" }]]);
 });
 
 test("resume skips only persisted done and keep items", async () => {
@@ -334,7 +334,7 @@ test("state is persisted running before an attempt and done only after verificat
     config: enabled, mode: "pilot", paths, appendAudit: async () => {},
     saveState: (_paths, value) => snapshots.push(JSON.parse(JSON.stringify(value))),
   });
-  assert.deepEqual(snapshots.map((snapshot) => Object.values(snapshot.applyProgress.entries)[0].status), ["running", "done"]);
+  assert.deepEqual(snapshots.map((snapshot) => Object.values(snapshot.applyProgress.entries)[0].status), ["running", "done", "done"]);
   assert.ok(snapshots.every((snapshot) => snapshot.applyProgress.planHash === plan([item(0)]).planHash));
 });
 
@@ -368,7 +368,10 @@ test("appendAudit writes private flushed JSONL, redacts forbidden data, and refu
   assert.equal(fs.statSync(target).mode & 0o777, 0o600);
   assert.equal(text.endsWith("\n"), true);
   assert.doesNotMatch(text, /SECRET/);
-  assert.deepEqual(JSON.parse(text), {
+  const { timestamp, provider, ...event } = JSON.parse(text);
+  assert.ok(Number.isFinite(Date.parse(timestamp)));
+  assert.equal(provider, "chatgpt");
+  assert.deepEqual(event, {
     type: "action", runId: "run-fixture", action: "move", status: "done", conversationId: "fixture-0",
   });
 
@@ -389,7 +392,29 @@ test("appendAudit never records arbitrary status or error text", (t) => {
   });
   const text = fs.readFileSync(path.join(paths.audit, "events.jsonl"), "utf8");
   assert.doesNotMatch(text, /SECRET/);
-  assert.deepEqual(JSON.parse(text), { type: "apply_action" });
+  const { timestamp, provider, ...event } = JSON.parse(text);
+  assert.ok(Number.isFinite(Date.parse(timestamp)));
+  assert.equal(provider, "chatgpt");
+  assert.deepEqual(event, { type: "apply_action" });
+});
+
+test("write events retain forensic context and bounded evidence without raw adapter content", async (t) => {
+  const paths = temporaryPaths(t);
+  const approvedPlan = plan([item(0, { currentProject: "prior-project-id" })]);
+  await apply({ plan: approvedPlan, audit: (event) => appendAudit(paths, event) });
+  const text = fs.readFileSync(path.join(paths.audit, "events.jsonl"), "utf8");
+  const events = text.trim().split("\n").map(JSON.parse);
+  assert.equal(events.length, 2);
+  for (const event of events) {
+    assert.equal(event.provider, "chatgpt");
+    assert.ok(Number.isFinite(Date.parse(event.timestamp)));
+    assert.deepEqual(event.previousLocation, { kind: "project", id: "prior-project-id" });
+  }
+  assert.deepEqual(events[1].verificationEvidence, { method: "conversation_location", status: "verified" });
+  appendAudit(paths, { type: "verification", provider: "SECRET", timestamp: "SECRET",
+    previousLocation: { kind: "project", id: "fixture-id", raw: "SECRET" },
+    verificationEvidence: { method: "conversation_location", status: "verified", body: "SECRET" } });
+  assert.doesNotMatch(fs.readFileSync(path.join(paths.audit, "events.jsonl"), "utf8"), /SECRET/);
 });
 
 function writeCommandFixture(t, { approvedPlan = plan([item(0)]), runState = state("PLAN_REVIEW"), config = enabled } = {}) {

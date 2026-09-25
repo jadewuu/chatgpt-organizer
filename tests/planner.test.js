@@ -31,6 +31,8 @@ const conversations = [{
 const extracted = [{
   provider: "chatgpt",
   conversationId: "fixture-chat-1",
+  url: "https://chatgpt.com/c/fixture-chat-1",
+  extractionEvidence: { fullIdResponse: true, stableRender: true, complete: true },
   messages: [
     { role: "user", text: "😀 first user" },
     { role: "assistant", text: "answer" },
@@ -176,7 +178,7 @@ test("plan command uses persisted phases for taxonomy, classification, and revie
   assert.equal(fs.existsSync(path.join(paths.plans, "migration-plan.json.tmp")), false);
 });
 
-test("plan refuses to rebuild a migration plan after entering PLAN_REVIEW", async (t) => {
+test("plan regenerates before writes and invalidates approvals, but refuses after writes begin", async (t) => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "chatgpt-organizer-plan-review-"));
   t.after(() => fs.rmSync(root, { recursive: true, force: true }));
   const paths = createPaths(root);
@@ -191,11 +193,24 @@ test("plan refuses to rebuild a migration plan after entering PLAN_REVIEW", asyn
   fs.writeFileSync(path.join(paths.plans, "migration-plan.json"), "existing plan\n");
   const state = createRunState("run", "account");
   state.phase = "PLAN_REVIEW";
+  state.approvals = { pilot: { planHash: "old" }, full: { planHash: "old" } };
+  state.pilotVerification = { status: "verified", planHash: "old" };
   saveRunState(paths, state);
 
-  await assert.rejects(run([], { rootDir: root, paths, config }), /CLASSIFY|PLAN_REVIEW/i);
-  assert.equal(fs.readFileSync(path.join(paths.plans, "migration-plan.json"), "utf8"), "existing plan\n");
+  assert.equal(await run([], { rootDir: root, paths, config, stdout: { write() {} } }), 0);
+  assert.equal(loadRunState(paths).approvals, undefined);
+  assert.equal(loadRunState(paths).pilotVerification, undefined);
   assert.equal(loadRunState(paths).phase, "PLAN_REVIEW");
+  const generated = fs.readFileSync(path.join(paths.plans, "migration-plan.json"), "utf8");
+  const written = loadRunState(paths);
+  written.applyProgress = { planHash: "old", entries: { attempted: { status: "running" } } };
+  saveRunState(paths, written);
+  await assert.rejects(run([], { rootDir: root, paths, config }), /write|recovery|progress/i);
+  assert.equal(fs.readFileSync(path.join(paths.plans, "migration-plan.json"), "utf8"), generated);
+});
+
+test("classification refuses to substitute blank messages when extraction is missing", () => {
+  assert.throws(() => buildClassificationInput(conversations, [], config), /extract|read|complete/i);
 });
 
 test("public full-content pass requires CLASSIFY and revises input without a plan or phase change", async (t) => {

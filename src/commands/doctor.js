@@ -1,6 +1,7 @@
 const fs = require("node:fs");
 const path = require("node:path");
 const { createPaths } = require("../core/paths");
+const { assertPrivatePath } = require("../providers/chatgpt/browser");
 const { loadConfig: defaultLoadConfig } = require("../core/config");
 const { validateTaxonomy: defaultValidateTaxonomy } = require("../core/validate");
 
@@ -60,6 +61,9 @@ function pathsCheck(paths) {
     return target !== local && !target.startsWith(`${local}${path.sep}`);
   });
   if (outside) return check("paths", "fail", `${outside} is outside .local`);
+  try {
+    for (const name of privatePathNames) assertPrivatePath(paths, paths[name]);
+  } catch { return check("paths", "fail", "Private paths contain a symlink or escape .local"); }
   return check("paths", "ok", `Private paths are contained by ${local}`);
 }
 
