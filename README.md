@@ -40,7 +40,7 @@ Stop on rate limits, access restrictions, account or workspace mismatch, changed
 - Your own Codex or Claude Code access
 
 ```bash
-git clone https://github.com/OWNER/chatgpt-organizer.git
+git clone https://github.com/jadewuu/chatgpt-organizer.git
 cd chatgpt-organizer
 pnpm install
 pnpm organizer doctor

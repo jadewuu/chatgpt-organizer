@@ -74,7 +74,7 @@ and may stop working when ChatGPT changes its UI or internal behavior.
 ### 5.1 Installation
 
 ```bash
-git clone https://github.com/OWNER/chatgpt-organizer.git
+git clone https://github.com/jadewuu/chatgpt-organizer.git
 cd chatgpt-organizer
 pnpm install
 ```
@@ -515,4 +515,3 @@ Version 0.1 is ready to publish when all of the following are true:
 - README, LICENSE, SECURITY, PRIVACY, and troubleshooting documentation exist.
 - A manual test using a dedicated ChatGPT account completes discovery, plan,
   pilot, apply, and verification successfully.
-
