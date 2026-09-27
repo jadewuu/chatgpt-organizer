@@ -1,5 +1,7 @@
 # ChatGPT Organizer
 
+English | [简体中文](README.zh-CN.md)
+
 Use your own Codex or Claude Code session to understand your ChatGPT history and safely organize it into native ChatGPT Projects.
 
 ## Sanitized before and after
@@ -18,12 +20,12 @@ The read-only plan explains each suggestion, its confidence, the current and pro
 
 | History provider | v0.1 status |
 | --- | --- |
-| ChatGPT Web history | Only target; experimental v0.1 adapter on macOS with Google Chrome; authenticated acceptance pending |
+| ChatGPT Web history | Only target; experimental v0.1 adapter on macOS with Google Chrome; authenticated login and read-only metadata/Project discovery accepted |
 | Claude Web history | Unsupported and unverified |
 
 Codex and Claude Code are supported **agent runtimes**, not history providers. Their semantic AI capability belongs to your own account. This repository supplies deterministic local scripts; it has no maintainer API key, hosted backend, telemetry, or maintainer-operated data service.
 
-Earlier personal scripts were manually exercised by the author. That experience does not validate this new adapter. The native contract for a stable unique workspace ID has not been established, so this version deliberately stops account-bound reads and writes with a workspace-identity error. Synthetic tests exercise the intended workflow; authenticated discovery, extraction, selectors, and an explicitly approved five-write pilot remain required before a release tag or publication.
+Authenticated read-only acceptance on 2026-09-26 validated the dedicated-profile login, current homepage selectors, metadata discovery, and native Project discovery. The adapter binds the account from `/backend-api/me` to one observed `chatgpt-account-id` that `/backend-api/wham/accounts/check` confirms is session-accessible, and persists only hashes. The endpoints remain unofficial and experimental. Complete message extraction and an explicitly approved five-write pilot remain required before a release tag; any missing or ambiguous identity evidence fails closed.
 
 ## Read-only by default
 
@@ -70,7 +72,7 @@ For Claude Code, paste:
 
 ## Plan, pilot, apply, verify, and clean up
 
-The following is the intended sequence after the workspace-identity contract passes authenticated acceptance. The current adapter stops at that gate; do not bypass it or treat extraction as complete:
+The following is the intended sequence. Login and read-only metadata/Project discovery passed authenticated acceptance, but do not treat that as completed message extraction or permission to write:
 
 1. **Preflight and login.** Run `pnpm organizer doctor`. When authentication is needed, run `pnpm organizer login` and sign in manually in the dedicated Chrome profile. Do not copy another browser profile or its cookies.
 2. **Read-only discovery.** Run `pnpm organizer discover`, then `pnpm organizer plan`. Have the agent show representative conversation-title samples and estimated counts for every proposed Project; then review `.local/plans/taxonomy.yaml` and explicitly approve or customize it.

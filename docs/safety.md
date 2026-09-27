@@ -18,6 +18,12 @@ Deleting conversations or Projects is unsupported. The adapter and public comman
 
 Stop immediately on a rate limit, access restriction, account mismatch, missing or ambiguous selector, changed plan hash, unavailable expected Project, browser interruption during a write, or uncertain verification. Do not automatically retry rate-limited writes. Re-check the account, unchanged plan, and current item state before any approved resume.
 
+## Authenticated identity contract
+
+The experimental adapter accepts an account only from a successful `/backend-api/me` response. It accepts a workspace only when exactly one `chatgpt-account-id` request header is observed and `/backend-api/wham/accounts/check` confirms that ID is accessible with the current session. Public or persisted state contains only hashes of those identifiers. Visible workspace labels are never identifiers.
+
+Before every approved write operation, the adapter reloads ChatGPT normally, discards earlier identity evidence, and requires fresh successful account, workspace-account, and request-header evidence. The single visible workspace context must then remain unchanged until the operation ends. A failed refresh, malformed response, identity mismatch, marker change, or ambiguous context stops before the next click.
+
 ## Unofficial automation and support
 
 This is unofficial browser automation for ChatGPT Web and may break when ChatGPT changes its interface or behavior. Use only repository commands and the ChatGPT adapter; never improvise browser clicks. Codex and Claude Code are supported agent runtimes for this repository, but this does not provide Claude Web history or provider compatibility.
