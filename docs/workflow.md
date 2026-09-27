@@ -2,7 +2,7 @@
 
 Read [AGENTS.md](../AGENTS.md) and [safety.md](safety.md) before operating on a user's account. The workflow is fixed; do not skip phases or substitute browser actions for repository commands.
 
-This is the intended workflow, exercised with synthetic data. The experimental adapter currently blocks account-bound operations until a trusted native unique-workspace identity contract passes authenticated acceptance. Do not substitute a visible workspace label or edit a fingerprint to bypass that gate.
+This workflow is exercised with synthetic data, and its login, metadata discovery, and native Project discovery paths passed authenticated read-only acceptance on 2026-09-26. The experimental identity contract binds `/backend-api/me` to one observed `chatgpt-account-id` that `/backend-api/wham/accounts/check` confirms is session-accessible. Only hashes are persisted. Every approved write operation must freshly re-establish that evidence and keep one visible workspace context stable throughout the operation. Do not substitute a visible label, reuse stale evidence, or edit a fingerprint to bypass a stop.
 
 | Phase | Command that advances the workflow | Artifact produced | Exact approval needed |
 | --- | --- | --- | --- |

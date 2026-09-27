@@ -1,14 +1,32 @@
+function normalizeTimestamp(value) {
+  if (value == null) return null;
+  if (typeof value === "number") return Number.isFinite(value) ? value : undefined;
+  if (typeof value !== "string") return undefined;
+  const match = value.match(/^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})$/);
+  if (!match) return undefined;
+  const [, yearText, monthText, dayText, hourText, minuteText, secondText] = match;
+  const [year, month, day, hour, minute, second] = [yearText, monthText, dayText, hourText, minuteText, secondText].map(Number);
+  const leap = year % 4 === 0 && (year % 100 !== 0 || year % 400 === 0);
+  const days = [31, leap ? 29 : 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
+  if (month < 1 || month > 12 || day < 1 || day > days[month - 1]
+    || hour > 23 || minute > 59 || second > 59) return undefined;
+  const milliseconds = Date.parse(value);
+  return Number.isFinite(milliseconds) ? milliseconds / 1000 : undefined;
+}
+
 function normalizeApiConversation(item) {
   if (!item || typeof item.id !== "string" || !/^[A-Za-z0-9_-]+$/.test(item.id)) return null;
   if (item.title != null && typeof item.title !== "string") return null;
-  if ([item.create_time, item.update_time].some((value) => value != null && (typeof value !== "number" || !Number.isFinite(value)))) return null;
+  const createdAt = normalizeTimestamp(item.create_time);
+  const updatedAt = normalizeTimestamp(item.update_time);
+  if (createdAt === undefined || updatedAt === undefined) return null;
   if (item.gizmo_id != null && typeof item.gizmo_id !== "string") return null;
   return {
     provider: "chatgpt",
     conversationId: item.id,
     title: item.title || "(无标题)",
-    createdAt: item.create_time ?? null,
-    updatedAt: item.update_time ?? null,
+    createdAt,
+    updatedAt,
     currentProject: item.gizmo_id ?? null,
     url: `https://chatgpt.com/c/${item.id}`,
   };

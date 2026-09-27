@@ -1,9 +1,9 @@
 const selectors = {
-  historyNavigation: 'nav[aria-label="历史聊天记录"], nav[aria-label="Chat history"], nav[aria-label="侧边栏"]',
+  historyNavigation: 'nav[aria-label="历史聊天记录"], nav[aria-label="聊天记录"], nav[aria-label="Chat history"], nav[aria-label="侧边栏"]',
   conversationLinks: 'nav[aria-label="历史聊天记录"] a[href*="/c/"], nav[aria-label="Chat history"] a[href*="/c/"], nav[aria-label="侧边栏"] a[href*="/c/"]',
   messageRoles: '[data-message-author-role]',
   markdown: ".markdown",
-  composer: 'textarea[placeholder*="ChatGPT"], textarea[placeholder*="发送消息"], #prompt-textarea',
+  composer: 'textarea[placeholder*="ChatGPT"], textarea[placeholder*="发送消息"], #prompt-textarea, form [contenteditable="true"][role="textbox"]',
   headerOptions: '[data-testid="conversation-options-button"], button[aria-label="Open conversation options"], button[aria-label="打开对话选项"]',
   openMenus: '[role="menu"][data-state="open"], [role="menu"]:visible',
   projectName: '#project-name, [role="dialog"] input[placeholder="Project name"], [role="dialog"] input[placeholder="项目名称"]',

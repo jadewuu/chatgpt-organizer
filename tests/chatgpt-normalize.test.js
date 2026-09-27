@@ -15,6 +15,25 @@ test("normalizes ChatGPT list items without message content", () => {
   });
 });
 
+test("normalizes current ChatGPT ISO timestamps to Unix seconds", () => {
+  assert.deepEqual(normalizeApiConversation({
+    id: "fixture-chat-iso",
+    title: "Synthetic ISO chat",
+    create_time: "2026-09-26T08:30:00.250000+00:00",
+    update_time: "2026-09-26T16:30:01+08:00",
+  }), {
+    provider: "chatgpt",
+    conversationId: "fixture-chat-iso",
+    title: "Synthetic ISO chat",
+    createdAt: 1790411400.25,
+    updatedAt: 1790411401,
+    currentProject: null,
+    url: "https://chatgpt.com/c/fixture-chat-iso",
+  });
+  assert.equal(normalizeApiConversation({ id: "fixture-chat", create_time: "not-a-timestamp" }), null);
+  assert.equal(normalizeApiConversation({ id: "fixture-chat", create_time: "2026-02-30T00:00:00Z" }), null);
+});
+
 test("deduplicates by provider and full conversation ID, retaining the latest item", () => {
   const old = normalizeApiConversation({ id: "fixture-chat-1", title: "Old", update_time: 1 });
   const latest = normalizeApiConversation({ id: "fixture-chat-1", title: "New", update_time: 2 });

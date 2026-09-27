@@ -69,7 +69,13 @@ class ChatGPTAdapter {
     this.listRequests = new Set();
     this.writeFingerprint = null;
     this.writeWorkspaceDigest = null;
+    this.writeWorkspaceMarker = null;
     this.workspaceFingerprint = null;
+    this.workspaceHeaderIds = new Set();
+    this.accessibleWorkspaceIds = null;
+    this.nativeProjects = null;
+    this.nativeProjectsComplete = false;
+    this.projectsFailure = null;
     this.targetConversationLoad = null;
     this.loadedConversationEvidence = null;
     this.conversationLoadRevision = 0;
@@ -100,7 +106,13 @@ class ChatGPTAdapter {
     this.page.on("request", this.requestListener);
     this.page.on("requestfinished", this.requestFinishedListener);
     this.page.on("requestfailed", this.requestFailedListener);
-    await this.browser.goto("https://chatgpt.com/");
+    try {
+      await this.browser.goto("https://chatgpt.com/");
+    } catch (error) {
+      let origin = null;
+      try { origin = new URL(this.page.url()).origin; } catch {}
+      if (!/net::ERR_ABORTED/i.test(String(error?.message || error)) || origin !== "https://chatgpt.com") throw error;
+    }
     return this.page;
   }
 
@@ -108,8 +120,20 @@ class ChatGPTAdapter {
     const url = new URL(response.url());
     if (url.origin !== "https://chatgpt.com") return;
     const session = url.pathname === "/api/auth/session";
+    const me = url.pathname === "/backend-api/me";
+    const workspaceAccounts = url.pathname === "/backend-api/wham/accounts/check";
+    const projectsSidebar = url.pathname === "/backend-api/gizmos/snorlax/sidebar";
     const list = url.pathname === "/backend-api/conversations";
     if (!session && !url.pathname.startsWith("/backend-api/")) return;
+    if (url.pathname.startsWith("/backend-api/")) {
+      try {
+        const workspaceId = await response.request().headerValue("chatgpt-account-id");
+        if (typeof workspaceId === "string" && workspaceId === workspaceId.trim()
+          && workspaceId.length > 0 && workspaceId.length <= 256 && !/[\r\n\0]/.test(workspaceId)) {
+          this.workspaceHeaderIds.add(workspaceId);
+        }
+      } catch {}
+    }
     if (response.status() === 429) this.failure = new Error("Rate limit detected; stopped");
     if (response.status() === 403) this.failure = new Error("Access restriction detected; stopped");
     if (response.status() === 401) this.authRequired = true;
@@ -142,7 +166,58 @@ class ChatGPTAdapter {
       }
       return;
     }
-    if (session) {
+    if (workspaceAccounts) {
+      if (response.status() !== 200) {
+        this.accessibleWorkspaceIds = null;
+        this.failure = new Error("Workspace account context is unavailable; stopped");
+        return;
+      }
+      let data;
+      try { data = await response.json(); } catch { data = null; }
+      if (!data || !Array.isArray(data.accounts)) {
+        this.failure = new Error("Workspace account context is malformed; stopped");
+        return;
+      }
+      const accessible = data.accounts
+        .filter((account) => account?.can_access_with_session === true && typeof account?.id === "string" && account.id.trim())
+        .map((account) => account.id);
+      this.accessibleWorkspaceIds = new Set(accessible);
+      return;
+    }
+    if (projectsSidebar) {
+      if (response.status() !== 200) {
+        this.projectsFailure = new Error("Project sidebar response has an unexpected HTTP status; inventory unchanged");
+        return;
+      }
+      let data;
+      try { data = await response.json(); } catch { data = null; }
+      if (!data || !Array.isArray(data.items) || data.cursor !== null) {
+        this.projectsFailure = new Error("Project sidebar response is malformed or incomplete; inventory unchanged");
+        return;
+      }
+      const projects = [];
+      for (const item of data.items) {
+        const project = item?.gizmo?.gizmo;
+        if (!project || typeof project.is_archived !== "boolean"
+          || typeof project.current_user_permission?.can_read !== "boolean") {
+          this.projectsFailure = new Error("Project sidebar item is malformed; inventory unchanged");
+          return;
+        }
+        if (project.is_archived || !project.current_user_permission.can_read) continue;
+        const id = typeof project.id === "string" ? project.id : "";
+        const name = typeof project.display?.name === "string" ? project.display.name.normalize("NFC").trim() : "";
+        if (!/^g-p-[A-Za-z0-9_-]+$/.test(id) || !name) {
+          this.projectsFailure = new Error("Project sidebar item is malformed; inventory unchanged");
+          return;
+        }
+        projects.push({ name, url: `https://chatgpt.com/g/${id}/project` });
+      }
+      this.nativeProjects = projects;
+      this.nativeProjectsComplete = true;
+      return;
+    }
+    if (session) return;
+    if (me) {
       const revision = ++this.sessionRevision;
       this.fingerprint = null;
       this.authRequired = true;
@@ -150,8 +225,9 @@ class ChatGPTAdapter {
       let data;
       try { data = await response.json(); } catch { return; }
       if (revision !== this.sessionRevision) return;
-      if (typeof data?.user?.id !== "string" || !data.user.id.trim()) return;
-      const digest = createHash("sha256").update(data.user.id).digest("hex").slice(0, 16);
+      const accountId = data?.id;
+      if (typeof accountId !== "string" || !accountId.trim()) return;
+      const digest = createHash("sha256").update(accountId).digest("hex").slice(0, 16);
       if (this.lastFingerprint && this.lastFingerprint !== digest) this.failure = new Error("Account mismatch; stopped");
       this.lastFingerprint = digest;
       this.fingerprint = digest;
@@ -190,11 +266,19 @@ class ChatGPTAdapter {
   async login({ timeoutMs = 10 * 60 * 1000 } = {}) {
     await this.open();
     const deadline = Date.now() + timeoutMs;
+    const readLoginState = async () => {
+      try {
+        return await this.loginState();
+      } catch (error) {
+        if (/execution context was destroyed.*navigation/i.test(String(error?.message || error))) return null;
+        throw error;
+      }
+    };
     do {
-      const state = await this.loginState();
-      if (state.loggedIn) {
+      const state = await readLoginState();
+      if (state?.loggedIn) {
         await this.page.waitForTimeout(3000);
-        if ((await this.loginState()).loggedIn) return { accountFingerprint: await this.getAccountFingerprint() };
+        if ((await readLoginState())?.loggedIn) return { accountFingerprint: await this.getAccountFingerprint() };
       }
       if (Date.now() >= deadline) break;
       await this.page.waitForTimeout(2000);
@@ -205,25 +289,12 @@ class ChatGPTAdapter {
   async #observeWorkspaceFingerprint() {
     const observe = async () => {
       await this.checkResponses();
-      const snapshot = await this.page.evaluate(({ command, selector }) => {
-        const visible = (node) => node.getClientRects().length > 0
-          && !["hidden", "collapse"].includes(getComputedStyle(node).visibility)
-          && getComputedStyle(node).opacity !== "0";
-        const markers = [...document.querySelectorAll(selector)].filter(visible)
-          .map((node) => (node.innerText || node.textContent || "").normalize("NFC").trim()).filter(Boolean);
-        // No authenticated native workspace-ID contract has been accepted yet.
-        // Fail closed until that contract is established; a display label is not an ID.
-        return { command, url: location.href, markers, nativeIdentity: null };
-      }, { command: "workspaceContext", selector: selectors.workspaceContext });
-      let url;
-      try { url = new URL(snapshot?.url); } catch { throw new Error("Workspace context URL is unavailable"); }
-      if (url.origin !== "https://chatgpt.com" || snapshot.markers?.length !== 1) {
-        throw new Error("Workspace context is missing or ambiguous");
+      const workspaceIds = [...this.workspaceHeaderIds];
+      if (workspaceIds.length !== 1) throw new Error("Stable unique workspace identity is missing or ambiguous");
+      if (!(this.accessibleWorkspaceIds instanceof Set) || !this.accessibleWorkspaceIds.has(workspaceIds[0])) {
+        throw new Error("Workspace identity is not verified by accessible account context");
       }
-      if (typeof snapshot.nativeIdentity !== "string" || !snapshot.nativeIdentity.trim()) {
-        throw new Error("Stable unique workspace identity unavailable; authenticated native contract validation is pending");
-      }
-      return createHash("sha256").update(JSON.stringify([this.fingerprint, snapshot.nativeIdentity, snapshot.markers[0]])).digest("hex");
+      return createHash("sha256").update(JSON.stringify([this.fingerprint, workspaceIds[0]])).digest("hex");
     };
     const first = await observe();
     await this.page.waitForTimeout(500);
@@ -235,7 +306,7 @@ class ChatGPTAdapter {
   async getAccountFingerprint({ workspaceFingerprint } = {}) {
     await this.open();
     await this.checkResponses();
-    for (let i = 0; !this.fingerprint && i < 30; i++) {
+    for (let i = 0; (!this.fingerprint || !this.accessibleWorkspaceIds || this.workspaceHeaderIds.size === 0) && i < 30; i++) {
       await this.page.waitForTimeout(500);
       await this.checkResponses();
     }
@@ -317,10 +388,27 @@ class ChatGPTAdapter {
 
   async listProjects() {
     await this.open();
+    if (!this.nativeProjectsComplete && !this.projectsFailure && typeof this.page.reload === "function") {
+      try {
+        await this.page.reload({ waitUntil: "domcontentloaded", timeout: 30000 });
+      } catch (error) {
+        let origin = null;
+        try { origin = new URL(this.page.url()).origin; } catch {}
+        if (!/net::ERR_ABORTED/i.test(String(error?.message || error)) || origin !== "https://chatgpt.com") throw error;
+      }
+      for (let i = 0; !this.nativeProjectsComplete && !this.projectsFailure && i < 40; i++) {
+        await this.page.waitForTimeout(250);
+        await this.checkResponses();
+      }
+    }
     const observe = async () => {
       await this.getAccountFingerprint();
       if (!(await this.loginState()).loggedIn) throw new Error("Login required in the dedicated profile; stopped");
-      const snapshot = await this.page.evaluate(({ selectors, noProjects, moreProjects }) => {
+      if (this.projectsFailure) throw this.projectsFailure;
+      const snapshot = this.nativeProjectsComplete ? {
+        url: this.page.url(), uncertain: false,
+        emptyState: this.nativeProjects.length === 0, entries: this.nativeProjects,
+      } : await this.page.evaluate(({ selectors, noProjects, moreProjects }) => {
         const visible = (node) => node.getClientRects().length > 0
           && !["hidden", "collapse"].includes(getComputedStyle(node).visibility) && getComputedStyle(node).opacity !== "0";
         const regions = [...document.querySelectorAll(selectors.projectsRegion)].filter(visible);
@@ -400,6 +488,10 @@ class ChatGPTAdapter {
       if (patterns.accessRestriction.test(snapshot.text || "")) return writeResult("access_restricted", "Access restriction detected");
       const markers = (snapshot.workspaceMarkers || []).map((value) => value.normalize("NFC").trim()).filter(Boolean);
       if (markers.length !== 1) return writeResult("uncertain", "Workspace context is missing or ambiguous");
+      if (this.writeWorkspaceMarker !== null && this.writeWorkspaceMarker !== markers[0]) {
+        return writeResult("access_restricted", "Workspace display context changed during the write");
+      }
+      this.writeWorkspaceMarker = markers[0];
       const digest = await this.#observeWorkspaceFingerprint();
       if ((this.workspaceFingerprint && this.workspaceFingerprint !== digest)
         || (this.writeWorkspaceDigest && this.writeWorkspaceDigest !== digest)) {
@@ -412,11 +504,33 @@ class ChatGPTAdapter {
     }
   }
 
-  async #prepareWrite() {
-    const before = await this.detectSafetyStop();
-    if (before.status !== "verified") return before;
+  async #refreshWriteIdentity() {
+    await this.open();
+    await this.checkResponses({ allowLoginRequired: true });
+    const expectedWorkspace = this.workspaceFingerprint || this.writeWorkspaceDigest;
+    this.fingerprint = null;
+    this.authRequired = true;
+    this.workspaceFingerprint = null;
+    this.workspaceHeaderIds.clear();
+    this.accessibleWorkspaceIds = null;
+    this.writeWorkspaceMarker = null;
+    this.nativeProjects = null;
+    this.nativeProjectsComplete = false;
+    this.projectsFailure = null;
+    if (typeof this.page.reload !== "function") throw new Error("Fresh account context is unavailable; stopped");
     try {
-      const fingerprint = await this.getAccountFingerprint({ workspaceFingerprint: this.writeWorkspaceDigest });
+      await this.page.reload({ waitUntil: "domcontentloaded", timeout: 30000 });
+    } catch (error) {
+      let origin = null;
+      try { origin = new URL(this.page.url()).origin; } catch {}
+      if (!/net::ERR_ABORTED/i.test(String(error?.message || error)) || origin !== "https://chatgpt.com") throw error;
+    }
+    return this.getAccountFingerprint({ workspaceFingerprint: expectedWorkspace });
+  }
+
+  async #prepareWrite() {
+    try {
+      const fingerprint = await this.#refreshWriteIdentity();
       if (this.writeFingerprint && this.writeFingerprint !== fingerprint) {
         return writeResult("access_restricted", "Account context changed");
       }
@@ -592,6 +706,9 @@ class ChatGPTAdapter {
     if (step.status !== "verified") return step;
     step = await this.#clickUnique({ control: "createSubmit", selector: selectors.projectDialogSubmit, pattern: patterns.projectSubmit });
     if (step.status !== "verified") return step;
+    this.nativeProjects = null;
+    this.nativeProjectsComplete = false;
+    this.projectsFailure = null;
     await this.page.waitForTimeout(500);
     try { projects = await this.listProjects(); } catch (error) { return mapWriteError(error); }
     return projects.filter((project) => project.name === name).length === 1
@@ -725,6 +842,9 @@ class ChatGPTAdapter {
     try { await this.browser.close(); await Promise.all([...this.pending]); }
     finally {
       this.page = null; this.fingerprint = null; this.workspaceFingerprint = null; this.failure = null; this.authRequired = false; this.items = [];
+      this.workspaceHeaderIds.clear(); this.accessibleWorkspaceIds = null;
+      this.nativeProjects = null; this.nativeProjectsComplete = false; this.projectsFailure = null;
+      this.writeFingerprint = null; this.writeWorkspaceDigest = null; this.writeWorkspaceMarker = null;
       this.targetConversationLoad = null; this.loadedConversationEvidence = null;
       this.discoveryFailure = null; this.validListResponses = 0; this.listRequests.clear(); this.lastFingerprint = null;
     }

@@ -15,8 +15,9 @@ const { main: readWrapper } = require("../scripts/04-read");
 const fixtures = require("./fixtures/conversations.json");
 
 function setup(t, { loggedIn = true, status = 200, accountId = "fixture-account", emitSession = true, emitList = true,
+  emitMe = true,
   workspaceMarkers = ["Synthetic workspace"], nativeIdentity = "synthetic-workspace-id", emitDetail = true,
-  detailJson = null,
+  detailJson = null, currentHomepage = false, gotoError = null,
   listJson = async () => ({ items: [...fixtures, { ...fixtures[0], title: "Synthetic latest", update_time: 1700000400 }] }) } = {}) {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "organizer-adapter-"));
   t.after(() => fs.rmSync(root, { recursive: true, force: true }));
@@ -51,7 +52,14 @@ function setup(t, { loggedIn = true, status = 200, accountId = "fixture-account"
   };
   const document = {
     title: "Synthetic detail - ChatGPT",
-    querySelector: (selector) => selector === selectors.historyNavigation && loggedIn ? nav : null,
+    querySelector: (selector) => {
+      if (!loggedIn) return null;
+      if (!currentHomepage) return selector === selectors.historyNavigation ? nav : null;
+      const candidates = selector.split(",").map((value) => value.trim());
+      if (candidates.includes('nav[aria-label="聊天记录"]')) return nav;
+      if (candidates.includes('form [contenteditable="true"][role="textbox"]')) return visibleNode;
+      return null;
+    },
     querySelectorAll: (selector) => {
       if (selector === "button" && !loggedIn) return [{ getClientRects: () => [1], getAttribute: () => null, textContent: "Log in" }];
       if (selector === selectors.messageRoles) return messages;
@@ -61,10 +69,9 @@ function setup(t, { loggedIn = true, status = 200, accountId = "fixture-account"
     },
   };
   page.evaluate = async (fn, arg) => {
-    const result = vm.runInNewContext(`(${fn.toString()})(arg)`, { arg, document, location,
+    const result = await vm.runInNewContext(`(${fn.toString()})(arg)`, { arg, document, location,
+      fetch: async () => ({ status: 200 }),
       getComputedStyle: (node) => ({ visibility: node.visibility || "visible", opacity: "1" }) });
-    // Synthetic native identity contract only; the live extractor remains unaccepted.
-    if (arg?.command === "workspaceContext") result.nativeIdentity = nativeIdentity;
     if (typeof arg === "string" && arg.startsWith("https://chatgpt.com/c/") && emitDetail) {
       const id = arg.split("/").at(-1);
       const request = { url: () => `https://chatgpt.com/backend-api/conversation/${id}` };
@@ -78,12 +85,20 @@ function setup(t, { loggedIn = true, status = 200, accountId = "fixture-account"
     return result === undefined ? undefined : JSON.parse(JSON.stringify(result));
   };
   let closed = 0;
+  const workspaceRequest = { headerValue: async (name) => name === "chatgpt-account-id" ? nativeIdentity : null };
   const browser = {
     launch: async () => page,
     goto: async () => {
       if (emitSession) page.emit("response", { url: () => "https://chatgpt.com/api/auth/session", status: () => 200,
         json: async () => ({ user: { id: accountId, email: "fixture@example.invalid" }, accessToken: "synthetic-token" }) });
-      if (emitList) page.emit("response", { url: () => "https://chatgpt.com/backend-api/conversations?offset=0", status: () => status, json: listJson });
+      if (emitMe) page.emit("response", { url: () => "https://chatgpt.com/backend-api/me", status: () => 200,
+        request: () => workspaceRequest, json: async () => ({ id: accountId }) });
+      if (nativeIdentity !== null) page.emit("response", { url: () => "https://chatgpt.com/backend-api/wham/accounts/check", status: () => 200,
+        request: () => workspaceRequest, json: async () => ({ default_account_id: nativeIdentity,
+          accounts: [{ id: nativeIdentity, can_access_with_session: true }] }) });
+      if (emitList) page.emit("response", { url: () => "https://chatgpt.com/backend-api/conversations?offset=0", status: () => status,
+        request: () => workspaceRequest, json: listJson });
+      if (gotoError) throw gotoError;
     },
     close: async () => { closed++; },
   };
@@ -109,11 +124,12 @@ test("fingerprint persists only a stable 16-hex digest and rejects account chang
   const saved = fs.readFileSync(path.join(paths.state, "account.json"), "utf8");
   assert.deepEqual(JSON.parse(saved), {
     accountFingerprint: fingerprint,
-    workspaceFingerprint: require("node:crypto").createHash("sha256").update(JSON.stringify([fingerprint, "synthetic-workspace-id", "Synthetic workspace"])).digest("hex"),
+    workspaceFingerprint: require("node:crypto").createHash("sha256").update(JSON.stringify([fingerprint, "synthetic-workspace-id"])).digest("hex"),
   });
   assert.doesNotMatch(saved, /fixture-account|fixture@example|synthetic-token|Synthetic workspace/);
-  page.emit("response", { url: () => "https://chatgpt.com/api/auth/session", status: () => 200,
-    json: async () => ({ user: { id: "fixture-other-account" } }) });
+  page.emit("response", { url: () => "https://chatgpt.com/backend-api/me", status: () => 200,
+    request: () => ({ headerValue: async () => "synthetic-workspace-id" }),
+    json: async () => ({ id: "fixture-other-account" }) });
   await assert.rejects(adapter.getAccountFingerprint(), /account mismatch/i);
 });
 
@@ -149,6 +165,15 @@ test("browser refuses non-dedicated paths and profile symlinks before launch", (
   assert.throws(() => createBrowser(paths), /symlink/i);
 });
 
+test("adapter accepts an aborted initial navigation only after Chrome reaches ChatGPT", async (t) => {
+  const { adapter, page } = setup(t, { gotoError: new Error("page.goto: net::ERR_ABORTED at https://chatgpt.com/") });
+  assert.equal(await adapter.open(), page);
+
+  const outside = setup(t, { gotoError: new Error("page.goto: net::ERR_ABORTED at https://chatgpt.com/") });
+  outside.page.url = () => "about:blank";
+  await assert.rejects(outside.adapter.open(), /ERR_ABORTED/);
+});
+
 test("authentication loss during reading stops before persisting message content", async (t) => {
   const { adapter, page, paths, setLoggedIn } = setup(t);
   await adapter.open();
@@ -158,25 +183,86 @@ test("authentication loss during reading stops before persisting message content
 });
 
 test("manual login can recover from an initial unauthenticated native response", async (t) => {
-  const { adapter, page, setLoggedIn } = setup(t, { loggedIn: false, status: 401 });
+  const { adapter, page, setLoggedIn } = setup(t, { loggedIn: false, status: 401, emitMe: false });
   page.waitForTimeout = async () => {
     setLoggedIn(true);
-    page.emit("response", { url: () => "https://chatgpt.com/api/auth/session", status: () => 200,
-      json: async () => ({ user: { id: "fixture-account" } }) });
+    page.emit("response", { url: () => "https://chatgpt.com/backend-api/me", status: () => 200,
+      request: () => ({ headerValue: async () => "synthetic-workspace-id" }),
+      json: async () => ({ id: "fixture-account" }) });
   };
   assert.match((await adapter.login()).accountFingerprint, /^[a-f0-9]{16}$/);
 });
 
-test("account verification waits for native session context and fails closed when absent", async (t) => {
-  const { adapter, page } = setup(t, { emitSession: false });
+test("manual login tolerates a page evaluation interrupted by authentication navigation", async (t) => {
+  for (const interruptedCall of [1, 2]) {
+    const { adapter, page } = setup(t);
+    const evaluate = page.evaluate;
+    let calls = 0;
+    page.evaluate = async (...args) => {
+      if (++calls === interruptedCall) {
+        throw new Error("Execution context was destroyed, most likely because of a navigation");
+      }
+      return evaluate(...args);
+    };
+
+    assert.match((await adapter.login()).accountFingerprint, /^[a-f0-9]{16}$/);
+  }
+});
+
+test("login state recognizes the current authenticated homepage structure", async (t) => {
+  const { adapter } = setup(t, { currentHomepage: true });
+  await adapter.open();
+
+  assert.deepEqual(await adapter.loginState(), { loggedIn: true, loginRequired: false, restricted: false });
+});
+
+test("account verification waits for native me context and fails closed when absent", async (t) => {
+  const { adapter, page } = setup(t, { emitSession: false, emitMe: false });
   page.waitForTimeout = async () => {
-    page.emit("response", { url: () => "https://chatgpt.com/api/auth/session", status: () => 200,
-      json: async () => ({ user: { id: "fixture-account" } }) });
+    page.emit("response", { url: () => "https://chatgpt.com/backend-api/me", status: () => 200,
+      request: () => ({ headerValue: async () => "synthetic-workspace-id" }),
+      json: async () => ({ id: "fixture-account" }) });
   };
   assert.match(await adapter.getAccountFingerprint(), /^[a-f0-9]{16}$/);
-  const absent = setup(t, { emitSession: false });
+  const absent = setup(t, { emitSession: false, emitMe: false });
   await assert.rejects(absent.adapter.getAccountFingerprint(), /account context unavailable/i);
   assert.equal(fs.existsSync(path.join(absent.paths.state, "account.json")), false);
+});
+
+test("account verification uses native me and an accessible workspace header without a display marker", async (t) => {
+  const { adapter, page, paths } = setup(t, { emitSession: false, emitMe: false, workspaceMarkers: [], nativeIdentity: null });
+  await adapter.open();
+  const workspaceId = "fixture-native-workspace";
+  const request = { headerValue: async (name) => name === "chatgpt-account-id" ? workspaceId : null };
+  page.emit("response", { url: () => "https://chatgpt.com/backend-api/me", status: () => 200,
+    request: () => request, json: async () => ({ id: "fixture-account" }) });
+  page.emit("response", { url: () => "https://chatgpt.com/backend-api/wham/accounts/check", status: () => 200,
+    request: () => request, json: async () => ({ default_account_id: workspaceId,
+      accounts: [{ id: workspaceId, can_access_with_session: true }] }) });
+
+  const accountFingerprint = await adapter.getAccountFingerprint();
+  assert.match(accountFingerprint, /^[a-f0-9]{16}$/);
+  assert.deepEqual(JSON.parse(fs.readFileSync(path.join(paths.state, "account.json"))), {
+    accountFingerprint,
+    workspaceFingerprint: require("node:crypto").createHash("sha256")
+      .update(JSON.stringify([accountFingerprint, workspaceId])).digest("hex"),
+  });
+});
+
+test("legacy session data cannot establish the native account identity", async (t) => {
+  const { adapter } = setup(t, { emitMe: false });
+  await assert.rejects(adapter.getAccountFingerprint(), /account context|native.*identity|login/i);
+});
+
+test("a failed workspace account refresh invalidates earlier identity evidence", async (t) => {
+  const { adapter, page } = setup(t);
+  await adapter.getAccountFingerprint();
+  page.emit("response", {
+    url: () => "https://chatgpt.com/backend-api/wham/accounts/check",
+    status: () => 503,
+    request: () => ({ headerValue: async () => "synthetic-workspace-id" }),
+  });
+  await assert.rejects(adapter.getAccountFingerprint(), /workspace|account context|unavailable/i);
 });
 
 test("discovery confirms the bottom with wheel nudging and checkpoints all captured IDs", async (t) => {
@@ -298,17 +384,19 @@ test("legacy --all wrapper re-reads incomplete checkpoints with the adapter's co
   }
 });
 
-test("an empty session invalidates fingerprint verification and cached reads until a later valid login", async (t) => {
-  for (const invalidSession of [{}, { user: {} }, { user: { id: "  " } }]) {
+test("an empty native me response invalidates fingerprint verification and cached reads until a later valid login", async (t) => {
+  for (const invalidMe of [{}, { id: null }, { id: "  " }]) {
     const { adapter, page } = setup(t);
     const record = await adapter.readConversation("fixture-chat-1");
-    page.emit("response", { url: () => "https://chatgpt.com/api/auth/session", status: () => 200, json: async () => invalidSession });
+    page.emit("response", { url: () => "https://chatgpt.com/backend-api/me", status: () => 200,
+      request: () => ({ headerValue: async () => "synthetic-workspace-id" }), json: async () => invalidMe });
     await assert.rejects(adapter.getAccountFingerprint(), /login|account context/i);
     await assert.rejects(adapter.readConversation("fixture-chat-1"), /login|account context/i);
     await assert.rejects(adapter.discoverConversations({ max: 1 }), /login|account context/i);
     await assert.rejects(adapter.login({ timeoutMs: 0 }), /login/i);
     page.waitForTimeout = async () => {
-      page.emit("response", { url: () => "https://chatgpt.com/api/auth/session", status: () => 200, json: async () => ({ user: { id: "fixture-account" } }) });
+      page.emit("response", { url: () => "https://chatgpt.com/backend-api/me", status: () => 200,
+        request: () => ({ headerValue: async () => "synthetic-workspace-id" }), json: async () => ({ id: "fixture-account" }) });
     };
     await adapter.login();
     assert.deepEqual(await adapter.readConversation("fixture-chat-1"), record);
@@ -319,18 +407,22 @@ test("legacy --all wrapper verifies the current account even when every checkpoi
   const { adapter, paths, page } = setup(t);
   await adapter.readConversation("fixture-chat-1");
   fs.writeFileSync(path.join(paths.raw, "conversations.json"), JSON.stringify([{ provider: "chatgpt", conversationId: "fixture-chat-1" }]));
-  page.emit("response", { url: () => "https://chatgpt.com/api/auth/session", status: () => 200, json: async () => ({}) });
+  page.emit("response", { url: () => "https://chatgpt.com/backend-api/me", status: () => 200,
+    request: () => ({ headerValue: async () => "synthetic-workspace-id" }), json: async () => ({}) });
   await assert.rejects(readWrapper(["--all"], { paths, adapter }), /login|account context/i);
 });
 
-test("a delayed old session cannot restore identity after a newer empty session", async (t) => {
+test("a delayed old native me response cannot restore identity after a newer empty response", async (t) => {
   const { adapter, page } = setup(t);
   await adapter.getAccountFingerprint();
   let resolveOld;
-  page.emit("response", { url: () => "https://chatgpt.com/api/auth/session", status: () => 200,
+  page.emit("response", { url: () => "https://chatgpt.com/backend-api/me", status: () => 200,
+    request: () => ({ headerValue: async () => "synthetic-workspace-id" }),
     json: () => new Promise((resolve) => { resolveOld = resolve; }) });
-  page.emit("response", { url: () => "https://chatgpt.com/api/auth/session", status: () => 200, json: async () => ({}) });
-  resolveOld({ user: { id: "fixture-account" } });
+  page.emit("response", { url: () => "https://chatgpt.com/backend-api/me", status: () => 200,
+    request: () => ({ headerValue: async () => "synthetic-workspace-id" }), json: async () => ({}) });
+  while (!resolveOld) await new Promise((resolve) => setImmediate(resolve));
+  resolveOld({ id: "fixture-account" });
   await assert.rejects(adapter.getAccountFingerprint(), /login|account context/i);
 });
 
@@ -341,6 +433,87 @@ test("lists visible native Projects with exact normalized names and deduplicates
     { name: "Résearch", url: "https://chatgpt.com/g/g-p-fixture-research/project" },
     { name: "Work  Notes", url: "https://chatgpt.com/g/g-p-fixture-work/project" },
   ]);
+});
+
+test("lists Projects from the complete native sidebar response when the DOM region is absent", async (t) => {
+  const { adapter, page, projectUI } = setup(t);
+  projectUI.regions = 0;
+  await adapter.open();
+  page.emit("response", {
+    url: () => "https://chatgpt.com/backend-api/gizmos/snorlax/sidebar",
+    status: () => 200,
+    json: async () => ({ cursor: null, items: [
+      { gizmo: { gizmo: { id: "g-p-fixture-native", is_archived: false,
+        current_user_permission: { can_read: true }, display: { name: "  Native  Project  " } } } },
+    ] }),
+  });
+
+  assert.deepEqual(await adapter.listProjects(), [
+    { name: "Native  Project", url: "https://chatgpt.com/g/g-p-fixture-native/project" },
+  ]);
+});
+
+test("rejects unknown native Project sidebar item shapes instead of omitting them", async (t) => {
+  for (const item of [
+    {},
+    { gizmo: { gizmo: { id: "g-p-fixture-native", is_archived: false,
+      display: { name: "Native Project" } } } },
+  ]) {
+    const { adapter, page, projectUI } = setup(t);
+    projectUI.regions = 0;
+    await adapter.open();
+    page.emit("response", {
+      url: () => "https://chatgpt.com/backend-api/gizmos/snorlax/sidebar",
+      status: () => 200,
+      json: async () => ({ cursor: null, items: [item] }),
+    });
+
+    await assert.rejects(adapter.listProjects(), /malformed|unsupported/i);
+  }
+});
+
+test("reloads the page to capture the native Project sidebar when initial loading did not emit it", async (t) => {
+  const { adapter, page, projectUI } = setup(t);
+  projectUI.regions = 0;
+  const evaluate = page.evaluate;
+  page.evaluate = async (fn, arg) => {
+    if (arg?.command === "refreshProjects") throw new Error("Direct Project fetch must not be used");
+    return evaluate(fn, arg);
+  };
+  let reloaded = false;
+  let emitted = false;
+  let waits = 0;
+  page.reload = async () => { reloaded = true; };
+  page.waitForTimeout = async () => {
+    if (reloaded && !emitted && ++waits >= 5) {
+      emitted = true;
+      page.emit("response", {
+        url: () => "https://chatgpt.com/backend-api/gizmos/snorlax/sidebar",
+        status: () => 200,
+        json: async () => ({ cursor: null, items: [] }),
+      });
+    }
+  };
+
+  assert.deepEqual(await adapter.listProjects(), []);
+});
+
+test("closing and reopening cannot reuse native identity or Project evidence", async (t) => {
+  const { adapter, page, projectUI } = setup(t);
+  projectUI.regions = 0;
+  await adapter.open();
+  page.emit("response", {
+    url: () => "https://chatgpt.com/backend-api/gizmos/snorlax/sidebar",
+    status: () => 200,
+    json: async () => ({ cursor: null, items: [{ gizmo: { gizmo: {
+      id: "g-p-fixture-native", is_archived: false,
+      current_user_permission: { can_read: true }, display: { name: "Native Project" },
+    } } }] }),
+  });
+  assert.equal((await adapter.listProjects()).length, 1);
+
+  await adapter.close();
+  await assert.rejects(adapter.listProjects(), /Project region|missing|uncertain/i);
 });
 
 test("Project listing excludes CSS-hidden entries", async (t) => {
@@ -406,7 +579,8 @@ test("Project listing rejects DOM changes between its bounded observations", asy
 test("Project listing stops on authentication loss during observation", async (t) => {
   const { adapter, page } = setup(t);
   page.waitForTimeout = async () => {
-    page.emit("response", { url: () => "https://chatgpt.com/api/auth/session", status: () => 200, json: async () => ({}) });
+    page.emit("response", { url: () => "https://chatgpt.com/backend-api/me", status: () => 200,
+      request: () => ({ headerValue: async () => "synthetic-workspace-id" }), json: async () => ({}) });
   };
   await assert.rejects(adapter.listProjects(), /login|account context/i);
 });
@@ -444,14 +618,11 @@ test("successful discover persists a new verified run state and advances only th
   assert.equal(state.phase, "DISCOVER");
 });
 
-test("discovery rejects missing or ambiguous workspace context before persisting a run", async (t) => {
-  for (const workspaceMarkers of [[], ["Synthetic workspace", "Other synthetic workspace"]]) {
-    const { adapter, paths } = setup(t, { workspaceMarkers });
-    const output = { write() {} };
-    assert.equal(await main(["discover", "--max", "1"], { adapter, paths, stdout: output, stderr: output }), 1);
-    assert.equal(loadRunState(paths), null);
-    assert.equal(fs.existsSync(path.join(paths.state, "account.json")), false);
-  }
+test("discovery binds verified native workspace identity without a display marker", async (t) => {
+  const { adapter, paths } = setup(t, { workspaceMarkers: [] });
+  const output = { write() {} };
+  assert.equal(await main(["discover", "--max", "1"], { adapter, paths, stdout: output, stderr: output }), 0);
+  assert.match(loadRunState(paths).workspaceFingerprint, /^[a-f0-9]{64}$/);
 });
 
 test("successful discover resumes AUTHENTICATE without rewinding a later phase", async (t) => {
@@ -502,6 +673,10 @@ function writeSetup(t, changes = {}) {
     confirmCreate: true,
     confirmMove: true,
     confirmArchive: true,
+    refreshIdentity: true,
+    identityRefreshes: 0,
+    accountId: "fixture-write-account",
+    workspaceId: "synthetic-write-workspace-id",
     ...changes,
   };
   page.url = () => state.url;
@@ -566,6 +741,7 @@ function writeSetup(t, changes = {}) {
       if (state.destructiveMatch === true && arg.control === "archive") return { count, destructive: true };
       state.clicks.push(arg.exactText === undefined ? arg.control : `destination:${arg.exactText}`);
       if (state.stopAfterClick === arg.control) state.safety.text = "Verify you are human";
+      if (state.changeMarkerAfterClick === arg.control) state.safety.workspaceMarkers = ["Other workspace"];
       if (arg.control === "createSubmit" && state.confirmCreate) {
         state.projects.push({ name: state.submittedProject, url: "https://chatgpt.com/g/g-p-created/project" });
       }
@@ -584,13 +760,44 @@ function writeSetup(t, changes = {}) {
     if (arg?.selectors && arg?.login) return { loggedIn: true, loginRequired: false, restricted: false };
     throw new Error(`Unexpected fake-page evaluation: ${JSON.stringify(arg)}`);
   };
+  const emitIdentity = () => {
+    const workspaceRequest = { headerValue: async (name) => name === "chatgpt-account-id" ? state.workspaceId : null };
+    page.emit("response", {
+      url: () => "https://chatgpt.com/backend-api/me",
+      status: () => 200,
+      request: () => workspaceRequest,
+      json: async () => ({ id: state.accountId }),
+    });
+    page.emit("response", {
+      url: () => "https://chatgpt.com/backend-api/wham/accounts/check",
+      status: () => 200,
+      request: () => workspaceRequest,
+      json: async () => ({ default_account_id: state.workspaceId,
+        accounts: [{ id: state.workspaceId, can_access_with_session: true }] }),
+    });
+  };
+  page.reload = async () => {
+    state.identityRefreshes++;
+    if (state.refreshIdentity) emitIdentity();
+    if (state.nativeProjectsOnRefresh) page.emit("response", {
+      url: () => "https://chatgpt.com/backend-api/gizmos/snorlax/sidebar",
+      status: () => 200,
+      json: async () => ({ cursor: null, items: state.projects.map((project) => ({ gizmo: { gizmo: {
+        id: new URL(project.url).pathname.split("/")[2], is_archived: false,
+        current_user_permission: { can_read: true }, display: { name: project.name },
+      } } })) }),
+    });
+  };
   const browser = {
     launch: async () => page,
-    goto: async () => page.emit("response", {
-      url: () => "https://chatgpt.com/api/auth/session",
-      status: () => 200,
-      json: async () => ({ user: { id: "fixture-write-account" } }),
-    }),
+    goto: async () => {
+      page.emit("response", {
+        url: () => "https://chatgpt.com/api/auth/session",
+        status: () => 200,
+        json: async () => ({ user: { id: state.accountId } }),
+      });
+      emitIdentity();
+    },
     close: async () => {},
   };
   const adapter = new ChatGPTAdapter({ paths, browser });
@@ -629,6 +836,19 @@ test("safety stops are typed and happen before any write click", async (t) => {
   assert.deepEqual(postClick.state.clicks, ["create"]);
 });
 
+test("cached identity cannot authorize a write without a fresh native refresh", async (t) => {
+  const { adapter, state } = writeSetup(t, { projects: [], refreshIdentity: false });
+  assert.equal((await adapter.createProject("Research")).status, "access_restricted");
+  assert.equal(state.identityRefreshes, 1);
+  assert.deepEqual(state.clicks, []);
+});
+
+test("a workspace marker change during a write stops before the next click", async (t) => {
+  const { adapter, state } = writeSetup(t, { projects: [], changeMarkerAfterClick: "create" });
+  assert.equal((await adapter.createProject("Research")).status, "access_restricted");
+  assert.deepEqual(state.clicks, ["create"]);
+});
+
 test("Project creation is exact, idempotent, and verified from the sidebar", async (t) => {
   const existing = writeSetup(t);
   assert.deepEqual(await existing.adapter.createProject("Work"), { status: "verified", evidence: "Project already exists" });
@@ -641,6 +861,13 @@ test("Project creation is exact, idempotent, and verified from the sidebar", asy
 
   const uncertain = writeSetup(t, { projects: [], confirmCreate: false });
   assert.equal((await uncertain.adapter.createProject("Research")).status, "uncertain");
+});
+
+test("Project creation refreshes a previously captured native snapshot before verification", async (t) => {
+  const { adapter, state } = writeSetup(t, { projects: [], nativeProjectsOnRefresh: true });
+  assert.equal((await adapter.createProject("Research")).status, "verified");
+  assert.ok(state.identityRefreshes >= 2);
+  assert.deepEqual(state.clicks, ["create", "createSubmit"]);
 });
 
 test("move and archive return verified only after observable final-state confirmation", async (t) => {
@@ -693,7 +920,7 @@ test("message Project links and generic status text cannot verify ownership or a
   assert.equal((await broadArchive.adapter.archiveConversation("fixture-chat")).status, "uncertain");
 });
 
-test("write safety rejects changed, missing, or multiple live workspace markers", async (t) => {
+test("write safety rejects missing or multiple markers without treating a label change as an identity change", async (t) => {
   for (const markers of [[], ["One", "Two"]]) {
     const fixture = writeSetup(t, { safety: { url: "https://chatgpt.com/", text: "", workspaceMarkers: markers } });
     assert.equal((await fixture.adapter.createProject("Research")).status, "uncertain");
@@ -703,8 +930,8 @@ test("write safety rejects changed, missing, or multiple live workspace markers"
   const changed = writeSetup(t);
   await changed.adapter.getAccountFingerprint();
   changed.state.safety.workspaceMarkers = ["Changed synthetic workspace"];
-  assert.equal((await changed.adapter.createProject("Research")).status, "access_restricted");
-  assert.deepEqual(changed.state.clicks, []);
+  assert.equal((await changed.adapter.createProject("Research")).status, "verified");
+  assert.deepEqual(changed.state.clicks, ["create", "createSubmit"]);
 });
 
 test("write adapter rejects invalid identifiers and destructive matched controls", async (t) => {

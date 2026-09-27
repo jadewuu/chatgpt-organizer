@@ -26,9 +26,9 @@ Stop immediately. The organizer intentionally does not retry rate-limited writes
 
 Keep the browser and coding agent stopped if the page state is uncertain. `pnpm organizer discover` gathers metadata; `node scripts/04-read.js --all` extracts messages and reuses only complete validated checkpoints. Classification refuses missing or incomplete extraction. The conservative extraction contract currently supports a native text-message branch whose content exactly matches two stable rendered observations. Unsupported attachments, tools, formatting differences, incomplete responses, or unstable renders stop extraction; they are not saved as complete. Inspect `.local/raw/` only on your machine. Do not fill gaps by editing inventory IDs or copying raw data into tracked files.
 
-## Stable unique workspace identity is unavailable
+## Authenticated account or workspace evidence is unavailable
 
-The experimental adapter has no accepted authenticated native workspace-ID contract yet. It deliberately blocks account-bound reads and writes. A visible label, including “Personal,” cannot distinguish workspaces. Preserve the stop and wait for a reviewed adapter update backed by authenticated contract evidence; do not invent an ID, patch state, or bypass the identity check. Synthetic workflow tests are not live acceptance.
+The experimental adapter requires a successful `/backend-api/me` response plus exactly one observed `chatgpt-account-id` that `/backend-api/wham/accounts/check` confirms is session-accessible. A visible label, including “Personal,” cannot establish identity. Before every approved write operation, stale evidence is discarded and this native contract must be observed again. If any part is unavailable, changed, malformed, or ambiguous, preserve the stop; do not invent an ID, patch state, reuse old evidence, or bypass the identity check.
 
 ## The plan hash changed or approval is rejected
 
